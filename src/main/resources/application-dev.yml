@@ -1,0 +1,9 @@
+
+campus:
+  pay:
+    mock-enabled: true
+
+spring:
+  data:
+    redis:
+      password: 1234
