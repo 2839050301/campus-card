@@ -3,8 +3,6 @@ package com.campus.card.common;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
-import java.awt.print.Book;
-
 /**
  * @Description
  * @Author u

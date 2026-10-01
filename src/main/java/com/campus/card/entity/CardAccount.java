@@ -23,7 +23,7 @@ public class CardAccount {
     private String studentNo; //学号
     private Long balance; //余额
     private Integer version; //乐观锁版本
-    private Integer status; //1 正常 2 冻结
+    private Integer status; //1 正常 0 冻结
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

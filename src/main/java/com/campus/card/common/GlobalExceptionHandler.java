@@ -2,6 +2,7 @@ package com.campus.card.common;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -34,6 +35,10 @@ public class GlobalExceptionHandler{
                 .findFirst()
                 .orElse("参数错误");
         return Result.fail(ErrCode.PARAM_ERROR,msg);
+    }
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public Result<Void> handleNotReadable(HttpMessageNotReadableException e) {
+        return Result.fail(ErrCode.PARAM_ERROR, "请求体格式错误");
     }
     @ExceptionHandler(DuplicateKeyException.class)
     public Result<Void> handleDuplicateKey(DuplicateKeyException e){

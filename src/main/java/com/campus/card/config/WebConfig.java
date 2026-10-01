@@ -1,7 +1,10 @@
 package com.campus.card.config;
 
+import com.campus.card.interceptor.LoginInterceptor;
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
@@ -9,8 +12,19 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  * @Author u
  * @Date 2026/9/30
  */
+@RequiredArgsConstructor
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
+    private final LoginInterceptor interceptor;
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(interceptor)
+                .addPathPatterns("/api/**")
+                .excludePathPatterns("/api/auth/login")
+                .excludePathPatterns("/api/ping")
+                .excludePathPatterns("/api/mock/**");
+    }
 
     @Override
     public void addCorsMappings(CorsRegistry  registry) {
