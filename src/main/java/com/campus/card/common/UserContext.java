@@ -16,6 +16,7 @@ public class UserContext {
     public static LoginUser get(){
         return HOLDER.get();
     }
+
     public static LoginUser verifyLogin(){
         LoginUser user = HOLDER.get();
         if(user == null){

@@ -69,6 +69,7 @@ public class AuthServiceImpl implements AuthService {
         }
         //签发token
         String token = jwtUtil.create(loginUser);
+        log.info("登录成功 account={} role={}", account, user.getRole());
         return new LoginVO(token, loginUser);
 
     }
