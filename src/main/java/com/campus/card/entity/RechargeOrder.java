@@ -20,7 +20,7 @@ public class RechargeOrder {
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private String orderNo;         // 平台充值单号，如 R20260929001
+    private String orderNo;         // 平台充值单号，如 R20261001001A7K3
     private String requestNo;       // ★ 客户端幂等号，对应 uk_request_no
     private String studentNo;
     private String cardNo;

@@ -43,4 +43,14 @@ public interface RechargeOrderMapper extends BaseMapper<RechargeOrder> {
      */
     RechargeOrderVO selectVoByOrderNo(@Param("studentNo") String studentNo,
                                       @Param("orderNo") String orderNo);
+
+
+    /**
+     * 按订单编号锁定
+     *
+     * @param orderNo
+     * @return {@link RechargeOrder }
+     */
+    @Select("SELECT * FROM t_recharge_order WHERE order_no =#{orderNo} FOR UPDATE")
+    RechargeOrder lockBYOrderNo(@Param("orderNo")String orderNo);
 }

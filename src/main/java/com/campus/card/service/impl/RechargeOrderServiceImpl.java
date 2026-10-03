@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.campus.card.common.BizException;
 import com.campus.card.constant.LimitConstant;
+import com.campus.card.constant.OrderStatusConstant;
 import com.campus.card.dto.RechargeCreateReq;
 import com.campus.card.entity.RechargeOrder;
 import com.campus.card.mapper.RechargeOrderMapper;
@@ -30,8 +31,7 @@ import java.time.LocalDateTime;
 @RequiredArgsConstructor
 public class RechargeOrderServiceImpl implements RechargeOrderService {
 
-    /** 待支付 */
-    private static final int STATUS_WAIT_PAY = 0;
+
 
     /* 充值过期时间 15min */
     private static final int EXPIRE_MINUTES = 15;
@@ -91,7 +91,7 @@ public class RechargeOrderServiceImpl implements RechargeOrderService {
         order.setCardNo(user.getCardNo());
         order.setAmount(amount);
         order.setPayMethod(req.getPayMethod());
-        order.setStatus(STATUS_WAIT_PAY);
+        order.setStatus(OrderStatusConstant.WAITING_FOR_PAYMENT);
         order.setChannelOrderNo("");
         order.setCreateTime(LocalDateTime.now());
         order.setExpireTime(LocalDateTime.now().plusMinutes(EXPIRE_MINUTES));
