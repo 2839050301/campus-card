@@ -3,7 +3,7 @@
 面向校园一卡通的**充值 → 支付回调 → 入账 → 对账**资金链路的后端服务。
 
 > 个人项目，按 10 天迭代推进。
-> **当前进度：Day 1–3**（工程骨架 / 登录认证 / 账户与流水查询）。
+> **当前进度：Day 1–4**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等）。
 > 后续计划见 [进度与路线图](#进度与路线图)。
 
 ---
@@ -25,7 +25,7 @@
 
 ---
 
-## 已完成的功能（Day 1–3）
+## 已完成的功能（Day 1–4）
 
 ### 1. 统一响应体与全局异常
 
@@ -47,6 +47,19 @@
 - 账户查询：余额、账户状态、单笔/单日限额、今日累计充值额。
 - 流水分页查询：支持按 `flowType`（`RECHARGE` / `CONSUME` / `REFUND` / `ADJUST`）过滤。
 
+### 4. 充值下单与幂等
+
+- **单号规则**：`R` + `yyyyMMdd` + 3 位 Redis 自增 + 4 位随机串（字母表剔掉易混的 `I` / `O` / `0` / `1`），例 `R20261001001A7K3`。自增段保证同日不重，随机段保证单号不可预测。
+- **支付方式**：`WECHAT` / `ALIPAY` / `UNIONPAY`；下单写 `t_recharge_order`，状态 `0`（待支付），**此时不碰余额**。
+- **金额校验**：必须是「元」的整数倍，单笔不超过 1000 元。
+- **单日限额软校验**：只统计 `status = 2`（已支付）的订单，而创建动作不改变这个聚合，所以**不加锁**（硬校验放在支付回调，见下）。
+- **三层幂等**：
+  1. `createOrder` **第一行**按 `requestNo` 查已存在的单，命中直接返回原单；
+  2. 并发窗口内撞车由 `t_recharge_order.uk_request_no` 唯一索引兜底，捕获 `DuplicateKeyException` 后回查并返回原单；
+  3. 该 Service 刻意**不加 `@Transactional`** —— 理由见「已经落地的设计决定」。
+
+实测（10 线程同一 `requestNo` 打同一接口）：**10/10 返回成功、库里只落 1 行、单号完全一致、0 死锁**。
+
 ---
 
 ## 接口一览
@@ -58,6 +71,9 @@
 | GET | `/api/auth/me` | 当前登录用户 | 需要 |
 | GET | `/api/card/account` | 我的账户（余额 / 限额 / 今日充值） | 学生 |
 | GET | `/api/card/flow` | 我的流水（分页 + `flowType` 过滤） | 学生 |
+| POST | `/api/recharge/order` | 创建充值订单（按 `requestNo` 幂等） | 学生 |
+| GET | `/api/recharge/order/page` | 我的充值订单（分页） | 学生 |
+| GET | `/api/recharge/order/{orderNo}` | 订单详情（只能查自己的单） | 学生 |
 
 **登录**
 
@@ -132,6 +148,41 @@ authorization: eyJhbGciOiJIUzM4NCJ9...
 ```
 
 > 接口文档启动后可见：<http://127.0.0.1:18082/swagger-ui.html>
+
+**创建充值订单（幂等）**
+
+`requestNo` 由前端生成并在**重试时保持不变** —— 同一个 `requestNo` 无论打多少次，都只会产生一单，且每次都返回**同一张单**。
+
+```http
+POST /api/recharge/order
+Content-Type: application/json
+authorization: eyJhbGciOiJIUzM4NCJ9...
+
+{
+  "requestNo": "REQ-7f3c1a92-4b0e-4d18-9c55-2a6e8d013f47",
+  "amount": 10000,
+  "payMethod": "WECHAT"
+}
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "orderNo": "R20261001001A7K3",
+    "requestNo": "REQ-7f3c1a92-4b0e-4d18-9c55-2a6e8d013f47",
+    "studentNo": "2023123456",
+    "cardNo": "6217123456781234",
+    "amount": 10000,
+    "payMethod": "WECHAT",
+    "status": 0,
+    "expireTime": "2026-10-01 12:15:00",
+    "createTime": "2026-10-01 12:00:00"
+  }
+}
+```
+
+> 幂等的边界：**幂等检查排在所有业务校验之前**。所以即使第二次请求带的金额非法（或当日额度已满），只要 `requestNo` 已存在，也照样返回原单 —— 否则「重试」就变成了一个会失败的操作。
 
 ---
 
@@ -222,14 +273,15 @@ curl http://127.0.0.1:18082/api/ping
 ```
 src/main/java/com/campus/card/
 ├── common/         Result / ErrCode / BizException / 全局异常处理 / UserContext
-├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt
-├── controller/     PingController / AuthController / AccountController
+├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt、Jackson
+├── constant/       LimitConstant（单笔 / 单日限额）
+├── controller/     PingController / AuthController / AccountController / RechargeController
 ├── dto/            请求体
 ├── entity/         与表一一对应
 ├── interceptor/    LoginInterceptor（JWT 校验 + 身份注入）
 ├── mapper/         MyBatis-Plus Mapper
 ├── service/        业务接口与实现
-├── util/           JwtUtil
+├── util/           JwtUtil / OrderNoGenerator
 └── vo/             响应体（不含敏感字段）
 ```
 
@@ -242,7 +294,7 @@ src/main/java/com/campus/card/
 | 1 | 工程骨架、统一响应体、全局异常、Swagger | ✅ 已完成 |
 | 2 | 登录认证（BCrypt + JWT + 拦截器 + ThreadLocal） | ✅ 已完成 |
 | 3 | 账户查询、流水分页查询 | ✅ 已完成 |
-| 4 | 充值下单、幂等（`requestNo` 唯一键） | ⏳ 计划中 |
+| 4 | 充值下单、幂等（`requestNo` 唯一键） | ✅ 已完成 |
 | 5 | 支付回调、异步通知与重试 | ⏳ 计划中 |
 | 6 | 入账（CAS 余额更新 + 流水写入） | ⏳ 计划中 |
 | 7 | 渠道对账单接入 | ⏳ 计划中 |
@@ -259,6 +311,9 @@ src/main/java/com/campus/card/
 - **分页响应固定四件套** `current` / `size` / `total` / `pages` + `records`，前端不用为每个列表单独适配。
 - **401 与 403 语义分开**：未登录 → 401（前端清 token 跳登录页）；已登录但角色不符 → 403（只提示，不踢下线）。
 - **不引入 `spring-boot-starter-security`**，只用 `spring-security-crypto` 拿 `BCryptPasswordEncoder`；鉴权用「拦截器 + ThreadLocal」手写，避免整条过滤器链带来的隐式行为。
+- **幂等检查必须放在方法最前面**。`createOrder` 第一行就是按 `requestNo` 查原单并直接返回，前面不允许出现任何会抛异常的校验 —— 否则重试会先撞上金额校验或限额校验，幂等失效。
+- **`createOrder` 不加 `@Transactional`**。该方法只有一条写语句，单条 `INSERT` 本身就是原子的，事务买不到额外保证，幂等的最终兜底是 `uk_request_no` 唯一索引。反过来加事务会坏事：`REPEATABLE READ` 下第一条 `SELECT` 就把快照定死了，`catch` 里回查看不到赢家刚提交的那行（第 3 层幂等失效）；锁也会跨过失败的 `INSERT` 留下共享锁，多个输家同时升级排他锁 → 直接判定死锁。
+- **限额校验分软硬两次**。下单时是**软校验**（不锁）：创建动作不改变「已支付金额」这个聚合，给它加锁没有意义。真正会破坏「单日累计 ≤ 2000 元」的是**写偏斜** —— 两个待支付单各自通过校验、各自支付成功；这类「两行加起来超了」的约束唯一索引表达不了。**硬校验放在支付回调**：先锁账户行（`card_no` 唯一索引等值、行必然存在 → 记录锁，能真正排队），再在锁保护下重算当日已付，超限则关单。
 
 ---
 

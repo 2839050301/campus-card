@@ -2,6 +2,7 @@ package com.campus.card.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.campus.card.common.BizException;
+import com.campus.card.constant.LimitConstant;
 import com.campus.card.entity.CardAccount;
 import com.campus.card.entity.User;
 import com.campus.card.mapper.CardAccountMapper;
@@ -26,11 +27,6 @@ import java.time.LocalDate;
 @RequiredArgsConstructor
 public class CardAccountServiceImpl implements CardAccountService {
 
-    //单笔限额
-    private static final long SINGLE_LIMIT=100_000L;
-    //单日限额
-    private static final long DAILY_LIMIT=200_000L;
-
     private final CardAccountMapper cardAccountMapper;
     private final RechargeOrderMapper rechargeOrderMapper;
     private final UserMapper userMapper;
@@ -40,7 +36,7 @@ public class CardAccountServiceImpl implements CardAccountService {
 
         CardAccount cardAccount = cardAccountMapper
                 .selectOne(new LambdaQueryWrapper<CardAccount>().eq(CardAccount::getStudentNo, studentNo));
-        if(cardAccount == null){
+        if (cardAccount == null) {
             throw new BizException("账户不存在");
         }
         //查询今日已充
@@ -61,8 +57,8 @@ public class CardAccountServiceImpl implements CardAccountService {
         vo.setCollege(user == null ? "" : user.getCollege());
         vo.setBalance(cardAccount.getBalance());
         vo.setStatus(cardAccount.getStatus());
-        vo.setSingleLimit(SINGLE_LIMIT);
-        vo.setDailyLimit(DAILY_LIMIT);
+        vo.setSingleLimit(LimitConstant.SINGLE_LIMIT);
+        vo.setDailyLimit(LimitConstant.DAILY_LIMIT);
         vo.setTodayRecharged(todayRecharged == null ? 0L : todayRecharged);
         return vo;
     }

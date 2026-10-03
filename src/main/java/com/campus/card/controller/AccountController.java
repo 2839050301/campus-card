@@ -33,7 +33,7 @@ public class AccountController {
     @Operation(summary = "查当前登录学生的账户与余额")
     @GetMapping("/account")
     public Result<AccountVO> getAccount() {
-        LoginUser user = requireStudent();
+        LoginUser user = UserContext.requireStudent();
         return Result.ok(cardAccountService.getMyAccount(user.getAccount()));
     }
 
@@ -43,7 +43,7 @@ public class AccountController {
     public Result<IPage<FlowVO>> flow(@RequestParam(defaultValue = "1") long current,
                                       @RequestParam(defaultValue = "10") long size,
                                       @RequestParam(required = false) String flowType){
-        LoginUser user = requireStudent();
+        LoginUser user = UserContext.requireStudent();
         return Result.ok(accountFlowService.pageFlow(user.getAccount(),flowType,current,size));
 
     }
@@ -53,13 +53,7 @@ public class AccountController {
 
 
 
-    private LoginUser requireStudent() {
-        LoginUser me = UserContext.verifyLogin();
-        if (!"STUDENT".equals(me.getRole())) {
-            throw new BizException("该接口仅学生可用");
-        }
-        return me;
-    }
+
 
 
 }

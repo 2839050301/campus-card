@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.campus.card.mapper.RechargeOrderMapper">
+
+    <!-- VO需要的所有查询字段，别名映射VO驼峰属性 -->
+    <sql id="voColumns">
+        o.order_no, o.request_no, o.student_no, u.name AS studentName,
+        o.card_no, o.amount, o.pay_method, o.status, o.channel_order_no,
+        o.create_time, o.pay_time, o.close_time, o.expire_time, o.bill_date, o.remark,
+        0 AS notifyStatus, 0 AS notifyTimes, NULL AS nextRetryTime
+    </sql>
+
+    <select id="selectVoPage" resultType="com.campus.card.vo.RechargeOrderVO">
+        SELECT
+        <include refid="voColumns"/>
+        FROM t_recharge_order o
+        LEFT JOIN t_user u ON o.student_no = u.account
+        <where>
+            o.student_no = #{studentNo}
+            <if test="status != null">
+                AND o.status = #{status}
+            </if>
+        </where>
+        ORDER BY o.create_time DESC, o.id DESC
+    </select>
+    <select id="selectVoByOrderNo" resultType="com.campus.card.vo.RechargeOrderVO">
+        SELECT
+        <include refid="voColumns"/>
+        FROM t_recharge_order o
+        LEFT JOIN t_user u ON u.account = o.student_no
+        <where>
+            o.student_no = #{studentNo}
+            AND o.order_no = #{orderNo}
+        </where>
+    </select>
+
+</mapper>
