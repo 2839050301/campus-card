@@ -3,7 +3,7 @@
 面向校园一卡通的**充值 → 支付回调 → 入账 → 对账**资金链路的后端服务。
 
 > 个人项目，按 10 天迭代推进。
-> **当前进度：Day 1–5**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账）。
+> **当前进度：Day 1–6**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试）。
 > 后续计划见 [进度与路线图](#进度与路线图)。
 
 ---
@@ -25,7 +25,7 @@
 
 ---
 
-## 已完成的功能（Day 1–5）
+## 已完成的功能（Day 1–6）
 
 ### 1. 统一响应体与全局异常
 
@@ -85,6 +85,30 @@
 | **超单日限额** | 第 3 笔被拦：`{"success":false,"errCode":"BIZ_ERROR","errMsg":"超出单日累计充值额度，订单已关闭，请联系管理员退款"}`；订单 `status = 4`、`close_time` 有值（**关单没被回滚**）、**没有流水、没有通知记录**，余额停在 200000 分 |
 | 关单后再投同一条回调 | `{"success":false,"errCode":"BIZ_ERROR","errMsg":"订单已关闭，回调忽略"}`（终态保护） |
 
+### 6. 异步通知与退避重试（Day 6）
+
+入账成功之后要通知「学校一卡通系统」，但**这个 HTTP 请求绝不能放在入账事务里**。
+
+- **为什么不能同步发**：事务里发 HTTP 最坏要等 3 秒（`RestTemplate` 3s 连接 / 3s 读超时），这 3 秒里订单行 + 账户行的锁一直不放；而且**跨系统没有分布式事务** —— HTTP 成功而事务回滚，对方以为到账、我们库里其实没有；HTTP 失败要回滚入账，用户的钱又该怎么办。唯一安全的顺序是「**先把事实落到自己库的同步事务里，再慢慢通知对方**」（outbox / 本地消息表，思路与 RocketMQ 事务消息一致，只是这个规模不必引入 MQ）。
+- **通知记录在事务里，HTTP 请求在事务外**：入账事务内只多写一行 `t_notify_record`（`status = 0` 待投递、`next_retry_time = now()`），commit 之后由定时任务去投。
+- **首次投递 = 第 0 次重试**：`next_retry_time` 首次也填 `NOW()`，定时任务只认「`status = 0` 且 `next_retry_time <= now`」。所以「首发」不是特殊分支，只是 `notify_times = 0` 的那一次重试 —— **一套代码零分支**。代价是首次投递最多晚一个扫描周期（5 秒）。
+- **退避算法**：`next_retry_time = 本次失败时刻 + backoff[notify_times]`，档位 **30 / 60 / 120 / 240 / 480 秒**（`application.yml` 生产档；`application-dev.yml` 是 3 / 6 / 12 / 24 / 48 秒的加速档，方便验收）。判据是 `notify_times > backoff.length` —— 用 **`>` 而不是 `>=`**，所以总共投 **6 次**（1 次首发 + 5 次重试）才置 `status = 2`（通知失败、需人工介入）。
+- **请求地址与请求体都是快照**：`notify_url` / `request_body` 在入账那一刻就写进通知记录，重试重发的**永远是同一个报文** —— 以后改了配置、或者订单对象早已不在内存，都不会影响已经在途的通知。
+- **验签**：投递带 `X-Campus-Timestamp` + `X-Campus-Sign = HMAC-SHA256(secret, timestamp + "." + body)`，接收端用同一规则算一遍再做**恒定时间比较**（长度不等直接 `false`、逐字符异或累加，不提前 `return`，避免用响应时间把签名一位一位试出来）。
+- **对方返回的成败判定**：`HTTP 200` 只说明传输层通了，业务成败看 body 里的 `code`；传输层异常走 `catch (RestClientException)` 保守当失败。模拟接收端故意用 **HTTP 200 + `{"code":500}`** 表示「对方系统繁忙」，就是为了逼出这条区分。
+- **超时关单**：`OrderCloseTask` 每 60 秒扫一次 `status = 0 AND expire_time < now()`，把未支付订单关掉（`status = 4` + `close_time` + `remark`）。**幂等靠 UPDATE 的 WHERE 条件本身**，扫多少遍都不会重复关。
+- **多实例下的重复投递**：`@Scheduled` 在**每个 JVM 各有一份**，两个实例会把同一条通知投两次。今天用 Redisson 一把批锁（`lock:notify:deliver`）挡住；更干净的做法是给表加「投递中」状态、用一次 `UPDATE ... WHERE id = ? AND status = 0` 原子抢占，把粒度从「一整批」缩到「一条记录」，锁寿命天然等于事务。
+
+实测（本地 dev 档退避 3/6/12/24/48 秒）：
+
+| 场景 | 结果 |
+|---|---|
+| 正常投递 | `status = 1`、`notify_times = 1`、`next_retry_time = NULL`、`response_body = {"code":0,"msg":"OK"}` |
+| 对方一直失败 | 五档间隔实测 **3 / 6 / 12 / 24 / 48 秒，一档不差**；第 6 次置 `status = 2`、`notify_times = 6` |
+| 超时关单 | 过期单 `status 0 → 4` 并写 `close_time`；**未过期的单原样不动**（边界用例） |
+| 验签 | 伪造签名 / 长度相同的假签名 / 干脆不带签名头 → 全部 `{"code":401,"msg":"sign 校验失败"}`；用真密钥自算 HMAC → `{"code":0,"msg":"OK"}` |
+| 事务边界（后端日志） | `INSERT t_notify_record` 与 `COMMIT` 在 16:53:53.675 结束，HTTP 请求出现在 **16:53:55.821** —— 通知确实在事务提交之后才发出去 |
+
 ---
 
 ## 接口一览
@@ -100,6 +124,8 @@
 | GET | `/api/recharge/order/page` | 我的充值订单（分页） | 学生 |
 | GET | `/api/recharge/order/{orderNo}` | 订单详情（只能查自己的单） | 学生 |
 | POST | `/api/mock/pay` | **模拟渠道异步回调**（`orderNo` + `result`） | 放行 |
+| POST | `/api/mock/terminal/notify` | **模拟学校一卡通系统**接收通知（验签 + 返回 `code`） | 放行 |
+| POST | `/api/mock/terminal/fail?on=true\|false` | 模拟对端故障开关（打开后通知必失败，用来看退避重试） | 放行 |
 
 **登录**
 
@@ -315,6 +341,18 @@ spring:
       password: 1234        # ← 改成你的
 ```
 
+通知相关配置（`application.yml`）：
+
+```yaml
+campus:
+  pay:
+    notify-url: http://127.0.0.1:18082/api/mock/terminal/notify   # 学校一卡通系统的接收地址
+    notify-secret: campus-card-notify-secret-2026                 # HMAC 验签密钥，两端必须一致
+    retry-backoff-seconds: 30,60,120,240,480                      # 退避档位（秒），dev 档 3,6,12,24,48
+```
+
+`retry-backoff-seconds` 是 **5 个档位 → 最多投 6 次**（首发 + 5 次重试），累计跨度 30+60+120+240+480 = **930 秒 ≈ 15.5 分钟**。
+
 ### 4. 启动
 
 ```bash
@@ -343,15 +381,16 @@ curl http://127.0.0.1:18082/api/ping
 ```
 src/main/java/com/campus/card/
 ├── common/         Result / ErrCode / BizException / 全局异常处理 / UserContext
-├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt、Jackson
-├── constant/       LimitConstant（单笔 / 单日限额）、OrderStatusConstant（订单状态 0–4）
-├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController
+├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt、Jackson、RestTemplate
+├── constant/       LimitConstant（单笔 / 单日限额）、OrderStatusConstant（订单状态 0–4）、NotifyStatusConstant（通知状态 0–2）
+├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController / TerminalNotifyController（模拟对端）
 ├── dto/            请求体
 ├── entity/         与表一一对应
 ├── interceptor/    LoginInterceptor（JWT 校验 + 身份注入）
 ├── mapper/         MyBatis-Plus Mapper
 ├── service/        业务接口与实现
-├── util/           JwtUtil / OrderNoGenerator
+├── task/           NotifyRetryTask（通知投递 + 退避重试）、OrderCloseTask（超时关单）
+├── util/           JwtUtil / OrderNoGenerator / SignUtil（HMAC-SHA256 验签）
 └── vo/             响应体（不含敏感字段）
 ```
 
@@ -366,7 +405,7 @@ src/main/java/com/campus/card/
 | 3 | 账户查询、流水分页查询 | ✅ 已完成 |
 | 4 | 充值下单、幂等（`requestNo` 唯一键） | ✅ 已完成 |
 | 5 | 支付回调幂等、单日限额硬校验、余额入账 + 流水 | ✅ 已完成 |
-| 6 | 异步通知与重试（`t_notify_record` 定时投递，模拟学校一卡通系统） | ⏳ 计划中 |
+| 6 | 异步通知与重试（`t_notify_record` 定时投递、退避重试、HMAC 验签、超时关单，模拟学校一卡通系统） | ✅ 已完成 |
 | 7 | 渠道对账单接入 | ⏳ 计划中 |
 | 8 | 三方对账引擎（排序归并） | ⏳ 计划中 |
 | 9 | 管理端接口（订单管理、差异处理） | ⏳ 计划中 |
@@ -389,6 +428,13 @@ src/main/java/com/campus/card/
 - **`@Transactional` 的 COMMIT 发生在 Service 方法返回那一刻，不是 Controller 返回那一刻**。`TransactionInterceptor` 挂在 Service 调用栈上，`@RestControllerAdvice` 挂在 DispatcherServlet 层、比它晚一整层 —— 所以「日志里打了异常 + 响应里带了错误信息」和「库里数据没变」可以同时成立，回滚早就做完了，兜底只是把异常翻译成响应。
 - **业务结果用返回值、技术异常用抛异常**。判据只有一句话：*抛出去的那一刻，这个事务里有没有「你想留下来的写操作」*。单日限额超了是**业务结果**（关单本身就是一个要保留的写操作）→ 必须 `return`；锁不到账户、余额更新影响 0 行才是**技术异常** → 必须 `throw` 让事务回滚。
 - **不信任渠道传来的金额**。回调只从渠道报文里取「付没付成功」和「渠道单号」，**金额一律以自己库里那张订单的 `amount` 为准**。（真实系统还差一步：**验签** —— 微信回调带 `sign`，要用 API 密钥按同规则算一遍比对，否则任何人 `curl` 一下就能白拿钱。）
+- **通知「在事务里登记、不在事务里发送」**。这是 Day 6 存在的全部理由：入账事务只多写一行 `t_notify_record`，HTTP 请求留给事务外的定时任务。事务里发 HTTP 会同时踩三个坑 —— ① 网络耗时把订单行 + 账户行的锁一直攥在手里；② 跨系统没有分布式事务，HTTP 与 COMMIT 只能保证一个，`HTTP 成功 + 事务回滚` 就是「对方以为到账、我们库里没有」；③ 对方宕机会直接拖垮我们的充值接口。思路与 RocketMQ 事务消息一致（本地消息表 / outbox），只是这个规模不必引入 MQ。
+- **首次投递 = 第 0 次重试**。`next_retry_time` 首次也填 `NOW()`，扫描条件只有一句「`status = 0` 且 `next_retry_time <= now`」。反面写法是「先同步发一次、失败再进重试队列」—— 报文拼装、签名、成功判定、日志要写两遍，两遍必然走偏，还凭空多出「首发失败」这个第三态。现在「首发」只是 `notify_times = 0` 的那一次重试，**一段代码零分支**。代价是首次投递最多晚一个扫描周期（5 秒），可以接受。
+- **MyBatis-Plus 的 `updateById` 写不进 `NULL`**。默认字段策略是 `NOT_NULL`，实体字段为 `null` 时该字段**不会出现在 `SET` 子句里**。投递成功后必须把 `next_retry_time` 清空，用 `updateById` 只会让旧时间永远留在库里 —— 定时任务会把这条**已经成功**的记录反复捞出来重投。正确写法是 `LambdaUpdateWrapper.set(NotifyRecord::getNextRetryTime, null)`。实测日志里那句 `Parameters: 1, {"code":0,"msg":"OK"}, 1, null, 29(Long)` 就是 `null` 真的进了 `SET` 的证据。
+- **Redisson 显式传 `leaseTime`，等于主动关掉看门狗**。看门狗只在**不传** `leaseTime` 时才启动（默认 30 秒租期、每 10 秒续一次，续期由独立的后台 Timer 线程做，跟任务线程卡不卡无关）。这里故意写死 30 秒，是为了把锁的寿命变成一个**能算的数**，反过来约束批大小 —— `BATCH × 单条超时 < 30 秒`。开着看门狗的话，锁活多久取决于 JVM 活多久，没有任何上界：一旦某个实例卡在不响应的 HTTP 上，锁被无限续期，其余实例全都抢不到，**整个集群的通知集体停摆**。权衡的结论是：**宁可重复投一次（业务有 `status` + 唯一索引兜着），不可全线卡死。**
+- **`AtomicBoolean` 挡不住多实例**。`NotifyRetryTask` 里的 `running` 标志只防「上一轮还没跑完、这一轮又叠进来」，它在**单个 JVM 内**有效；两个实例各有各的 `running`，互相完全不可见。多实例的重复投递要么靠分布式锁，要么靠数据库原子抢占 —— **锁的粒度越细越并行，代价是必须处理「抢到了却没回写」**（细粒度方案要加 `claim_time` 列和超时回收，粗粒度方案不需要）。
+- **接口返回假值，比不返回更危险**。`notifyStatus` / `notifyTimes` / `nextRetryTime` 曾经被硬编码成 `0 / 0 / null`，而前端三个页面其实一直在读真值 —— 结果是「通知终端失败」的黄色告警条和「重发通知」按钮**永远不显示**。前端不会报错，它只是永远走不到那个分支，所以这种 bug 只能靠端到端验收发现。修法是查询路径用 `LEFT JOIN t_notify_record` 取真值（`toVO` 只服务新建单那条路径，此刻确实还没有通知记录，那里填 0 是对的）。同时用 `n.status` 而不是 `IFNULL(n.status, 0)`：**「没有通知这件事」和「有一条等着投递的通知」是两回事**，前端把 `NULL` 渲染成 `-` 才是正确的表达。
+- **验签用恒定时间比较**。`SignUtil.verify` 先判 null、再判长度，最后逐字符异或累加而不是提前 `return` —— 普通 `equals` 会在第一个不同的字符处立刻返回，攻击者靠响应时间就能一位一位把签名试出来。
 
 ---
 
