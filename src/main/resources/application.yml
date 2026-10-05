@@ -13,7 +13,7 @@ spring:
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: GMT+8
-  data:                          # ★ Spring Boot 3：redis 挪到 data 下面了
+  data: # ★ Spring Boot 3：redis 挪到 data 下面了
     redis:
       host: 127.0.0.1
       port: 6379
@@ -43,6 +43,7 @@ campus:
     ttl-minutes: 720
   pay:
     notify-url: http://127.0.0.1:18082/api/mock/terminal/notify
+    notify-secret: campus-card-notify-secret-2026      # ★ 新增：通知签名密钥
     order-expire-minutes: 15
     retry-backoff-seconds: 30,60,120,240,480
 

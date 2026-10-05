@@ -4,11 +4,26 @@
 <mapper namespace="com.campus.card.mapper.RechargeOrderMapper">
 
     <!-- VO需要的所有查询字段，别名映射VO驼峰属性 -->
+    <!-- ★ 后三个字段【不是】 t_recharge_order 的列，真身在 t_notify_record。
+         原来这里写死 `0 AS notifyStatus, 0 AS notifyTimes, NULL AS nextRetryTime`，
+         后果是两个前端页面永远看到假数据：
+           records.html:144      v-if="o.status === 2 && o.notifyStatus === 2" 永远 false
+                                 → 「通知终端失败」的黄条一次都不显示
+           admin-orders.html:130 通知状态徽标永远停在「待通知 / 0 次」
+           admin-orders.html:145 重发通知按钮 v-if="... notifyStatus === 2" 永远不出现
+         ★ 一条充值单最多对应一条通知记录：只有入账成功那一瞬才会 createPending，
+           而回调的 status=2 幂等 + 订单行 FOR UPDATE 记录锁保证了同一单只入账一次。
+           所以这个 LEFT JOIN 不会让行数变多、不会污染分页的 total。
+         ★ 但注意：数据库层【没有】这条约束 —— t_notify_record 只有
+           KEY idx_order_no（普通索引），不是 UNIQUE。这条不变式是代码保证的，
+           哪天代码写坏了（同一单 createPending 两次），这里就会扇出重复行。
+         ★ 未支付的单没有通知记录，n.* 全是 NULL，前端 DICT 会渲染成 "-"，这是对的
+           （「还没有通知这件事」和「待通知」是两回事，不要用 IFNULL 硬凑成 0）。 -->
     <sql id="voColumns">
         o.order_no, o.request_no, o.student_no, u.name AS studentName,
         o.card_no, o.amount, o.pay_method, o.status, o.channel_order_no,
         o.create_time, o.pay_time, o.close_time, o.expire_time, o.bill_date, o.remark,
-        0 AS notifyStatus, 0 AS notifyTimes, NULL AS nextRetryTime
+        n.status AS notifyStatus, n.notify_times AS notifyTimes, n.next_retry_time AS nextRetryTime
     </sql>
 
     <select id="selectVoPage" resultType="com.campus.card.vo.RechargeOrderVO">
@@ -16,6 +31,8 @@
         <include refid="voColumns"/>
         FROM t_recharge_order o
         LEFT JOIN t_user u ON o.student_no = u.account
+        <!-- ★ 通知记录：一条单最多一条，理由见上面 voColumns 的说明 -->
+        LEFT JOIN t_notify_record n ON n.order_no = o.order_no
         <where>
             o.student_no = #{studentNo}
             <if test="status != null">
@@ -29,6 +46,7 @@
         <include refid="voColumns"/>
         FROM t_recharge_order o
         LEFT JOIN t_user u ON u.account = o.student_no
+        LEFT JOIN t_notify_record n ON n.order_no = o.order_no
         <where>
             o.student_no = #{studentNo}
             AND o.order_no = #{orderNo}

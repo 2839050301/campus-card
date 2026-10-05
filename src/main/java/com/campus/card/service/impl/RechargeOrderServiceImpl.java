@@ -151,8 +151,11 @@ public class RechargeOrderServiceImpl implements RechargeOrderService {
         vo.setExpireTime(o.getExpireTime());
         vo.setBillDate(o.getBillDate());
         vo.setRemark(o.getRemark());
-        // 后三个字段的真身在 t_notify_record（Day 7 建）。现在固定给「还没通知」，
-        // 前端 records.html:144 的 v-if="o.notifyStatus === 2" 才会是 false
+        // ★ 这里是【新建单】的返回路径（createOrder 特有）：走到这里说明单子刚插进去，
+        //   此刻必然还没有通知记录 —— 通知记录是入账成功那一瞬才写的（Day 6 的
+        //   createPending），而这张单的状态是 0 待支付。所以固定给「0 待通知」是【对的】。
+        // ★ 查询路径（pageMyOrders / getMyOrder）不走这里，它们走 RechargeOrderMapper.xml，
+        //   那三个字段由 LEFT JOIN t_notify_record 取真值。两条路径别混。
         vo.setNotifyStatus(0);
         vo.setNotifyTimes(0);
         return vo;

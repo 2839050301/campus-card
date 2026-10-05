@@ -5,12 +5,11 @@ import com.campus.card.constant.LimitConstant;
 import com.campus.card.constant.OrderStatusConstant;
 import com.campus.card.entity.AccountFlow;
 import com.campus.card.entity.CardAccount;
-import com.campus.card.entity.NotifyRecord;
 import com.campus.card.entity.RechargeOrder;
 import com.campus.card.mapper.AccountFlowMapper;
 import com.campus.card.mapper.CardAccountMapper;
-import com.campus.card.mapper.NotifyRecordMapper;
 import com.campus.card.mapper.RechargeOrderMapper;
+import com.campus.card.service.NotifyRecordService;
 import com.campus.card.service.PayCallbackService;
 import com.campus.card.util.OrderNoGenerator;
 import com.campus.card.vo.PayCallbackVO;
@@ -36,12 +35,8 @@ public class PayCallbackServiceImpl implements PayCallbackService {
     private final RechargeOrderMapper rechargeOrderMapper;
     private final CardAccountMapper cardAccountMapper;
     private final AccountFlowMapper accountFlowMapper;
-    private final NotifyRecordMapper notifyRecordMapper;
-    /**
-     * 学校一卡通系统的通知地址（演示用，Day 6 的通知任务往这里发）
-     */
-    private static final String NOTIFY_URL = "http://127.0.0.1:18088/mock/receive";
     private final OrderNoGenerator orderNoGenerator;
+    private final NotifyRecordService notifyRecordService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -121,15 +116,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         rechargeOrderMapper.updateById(order);
 
         //写通知记录(status=0 待通知)
-        NotifyRecord nr = new NotifyRecord();
-        nr.setOrderNo(order.getOrderNo());
-        nr.setNotifyUrl(NOTIFY_URL);
-        nr.setRequestBody(buildNotifyBody(order));
-        nr.setResponseBody("");
-        nr.setStatus(0);
-        nr.setNotifyTimes(0);
-        nr.setNextRetryTime(LocalDateTime.now());
-        notifyRecordMapper.insert(nr);
+        notifyRecordService.createPending(order);
 
         log.info("入账成功 orderNo={} cardNo={} amount={}分 balanceAfter={}分",
                 order.getOrderNo(), order.getCardNo(), order.getAmount(), balanceAfter);
@@ -166,10 +153,5 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         return payMethod == null ? "" : payMethod;
     }
 
-    private String buildNotifyBody(RechargeOrder order) {
-        return "{\"orderNo\":\"" + order.getOrderNo()
-                + "\",\"cardNo\":\"" + order.getCardNo()
-                + "\",\"amount\":" + order.getAmount()
-                + ",\"status\":2}";
-    }
+
 }
