@@ -3,7 +3,7 @@
 面向校园一卡通的**充值 → 支付回调 → 入账 → 对账**资金链路的后端服务。
 
 > 个人项目，按 10 天迭代推进。
-> **当前进度：Day 1–6**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试）。
+> **当前进度：Day 1–7**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试 / 三方对账引擎）。
 > 后续计划见 [进度与路线图](#进度与路线图)。
 
 ---
@@ -25,7 +25,7 @@
 
 ---
 
-## 已完成的功能（Day 1–6）
+## 已完成的功能（Day 1–7）
 
 ### 1. 统一响应体与全局异常
 
@@ -109,6 +109,32 @@
 | 验签 | 伪造签名 / 长度相同的假签名 / 干脆不带签名头 → 全部 `{"code":401,"msg":"sign 校验失败"}`；用真密钥自算 HMAC → `{"code":0,"msg":"OK"}` |
 | 事务边界（后端日志） | `INSERT t_notify_record` 与 `COMMIT` 在 16:53:53.675 结束，HTTP 请求出现在 **16:53:55.821** —— 通知确实在事务提交之后才发出去 |
 
+### 7. 三方对账引擎（Day 7）
+
+把「渠道账单」「平台充值单」「账户流水」三份记录并起来对，找出不一致。
+
+- **对的是三方，不是两方**。渠道账单记「钱到了渠道」，充值单记「交易成立」，账户流水记「钱落在卡上」。前两本对完只能发现「有一边没有」和「金额不一样」；而「渠道收了钱、充值单也记成已支付，可是那笔钱没有真的加到学生卡上」这一类，**在两方视角下根本不存在** —— 渠道不知道学生的卡号，充值单也只记交易不记余额。只有把流水拉进来当第三本账，它才现形。对账的本质是**找一个能同时在两本账上出现的键，再比它们对同一个事实的记录是否一致**；反过来，把同一种记录再抄一份什么也发现不了 —— 只有「记录的事实不同」的账才有对的价值。
+- **关联键是渠道单号，不是我们的订单号**。渠道不认识我们自己生成的 `R` 单号，两边唯一共有的就是渠道流水号。拿订单号去 join，结果永远是「两边都对不上」。
+- **排序归并，不是循环查库**。两边各自按渠道单号排序（`O(n log n)`），然后双指针扫一遍（`O(n)`）：本地有、渠道没有 → `LOCAL_ONLY`；渠道有、本地没有 → `CHANNEL_ONLY`；两边都有但金额不等 → `AMOUNT_DIFF`。反面写法是拿每条平台单去渠道账单里 `SELECT` 一次，几万行就是几万次查询。同理，`NOT_POSTED` 用**一次 `IN` 查询**把当天所有充值流水捞进 `Set<String>` 再比对，绝不在循环里 `selectCount`。
+- **差异要分类，因为处理方式不同**。`LOCAL_ONLY`（平台有、渠道无，**短款** —— 唯一会真丢钱的，要逆向冲正）、`CHANNEL_ONLY`（渠道有、平台无，**长款** —— 钱没丢、只是账不平，人工补单）、`AMOUNT_DIFF`（两边都有但金额不一致）、`NOT_POSTED`（已收款未入账，只有对三方才能发现）。另有一个 `STATUS_DIFF` 预留枚举，当前演示数据不产生。
+- **同一天同一个渠道可以重复跑**。`uk_date_channel` 唯一索引让 `t_recon_task` 只留一行，「跑第二次」是覆盖不是新增；`create_time` 记的是**首次**对账时间、重复跑不覆盖它，本次耗时单独记在 `cost_ms`，前端用 `finishTime - createTime` 还原。
+- **重跑不能让「人做过的判断」消失**。差异明细是按 `task_id` 全删再重插的，但重插之前先把 `handled = 1` 的行按**内容**抄进内存 —— 键是 `orderNo + diffType + channelOrderNo`，**必须带渠道单号**，因为单边缺失的行订单号是空串，只按前两段会把不同的差异认成同一条。重插后原样盖回去，所以**差异行的自增 id 每次都变，核销状态一次都不丢**。
+- **核销用条件更新，不是先查后改**。`UPDATE ... SET handled = 1 WHERE id = ? AND handled = 0`，影响 0 行才返回「该差异已被其他人处理，请刷新后查看」。两个管理员同时点只有一个人的写入生效 —— 这不是靠 Java 里的 `if` 拦的，是数据库替你拦的。
+- **`run()` 带 `@Transactional(rollbackFor = Exception.class)`**。整段只有数据库操作，没有 HTTP、没有文件 IO、没有等待用户输入，属于「要么全成、要么全不成」的典型。反过来白天刚学的「HTTP 不放在事务里」也是同一条规矩的两面。
+- **账单来源是造数器**。本地没有真实渠道商户号，`pullChannelBill` 从当天已支付订单派生出渠道账单（按渠道单号升序重抄一遍），然后朝三个方向各拧一下：删掉最小的一笔 → `LOCAL_ONLY`、给第二笔加 1 元 → `AMOUNT_DIFF`、追加一笔幽灵单 → `CHANNEL_ONLY`。**造差异是为了让引擎拿到一道已知答案的题** —— 不造差异 `diff_count` 永远是 0，就分不清「引擎真的算对了」和「写了个永远返回空差异列表的 bug」。函数名、参数、返回值、幂等早退都是真的，被桩掉的只有函数体，接真实账单只改这一个方法。
+
+实测（3 笔各 100 元，故意造出四类差异）：
+
+| 场景 | 结果 |
+|---|---|
+| 首次对账 | 平台侧 3 笔 ¥300.00、渠道侧 3 笔 ¥251.00、**差异 4 笔**、`status = 1`、耗时 7 ms |
+| 四类差异齐全 | `LOCAL_ONLY`（渠道单号为空串）、`AMOUNT_DIFF`（100 / 101）、`CHANNEL_ONLY`（订单号为空串，50 元幽灵单）、`NOT_POSTED`（100 / 100）各一条 |
+| 同一天重复跑 | `t_recon_task` 仍是 **1 行**、差异仍是 **4 行**（不是 8）、`create_time` 不变而 `cost_ms` 从 7 变到 76、渠道账单表仍是 3 行（造数器幂等） |
+| 核销后重跑 | 差异行 id 从 9 走到 21（删了重插三轮），**`handled` / `handle_remark` / `handle_time` 三次全部原封不动** |
+| 重复核销同一行 | `{"success":false,"errCode":"BIZ_ERROR","errMsg":"该差异已被其他人处理，请刷新后查看"}` |
+| 学生 token 打四个管理端接口 | 全部 HTTP 200 + `{"success":false,"errCode":"BIZ_ERROR","errMsg":"该接口仅管理员可用"}` |
+| 选的日期没有已支付单 | `{"success":false,"errCode":"BIZ_ERROR","errMsg":"2026-10-07 没有支付成功的充值单，无需对账"}` —— **宁可报错，也不给一个可能是假的「平」** |
+
 ---
 
 ## 接口一览
@@ -126,6 +152,10 @@
 | POST | `/api/mock/pay` | **模拟渠道异步回调**（`orderNo` + `result`） | 放行 |
 | POST | `/api/mock/terminal/notify` | **模拟学校一卡通系统**接收通知（验签 + 返回 `code`） | 放行 |
 | POST | `/api/mock/terminal/fail?on=true\|false` | 模拟对端故障开关（打开后通知必失败，用来看退避重试） | 放行 |
+| GET | `/api/admin/recon/task` | 对账任务分页 | 管理员 |
+| POST | `/api/admin/recon/run` | 跑对账（`billDate` + `channel`，同一天同一渠道可重复跑） | 管理员 |
+| GET | `/api/admin/recon/diff` | 差异明细分页（可按 `taskId` / `diffType` 过滤） | 管理员 |
+| POST | `/api/admin/recon/diff/handle` | 核销一条差异（`id` + 可选 `remark`） | 管理员 |
 
 **登录**
 
@@ -382,8 +412,8 @@ curl http://127.0.0.1:18082/api/ping
 src/main/java/com/campus/card/
 ├── common/         Result / ErrCode / BizException / 全局异常处理 / UserContext
 ├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt、Jackson、RestTemplate
-├── constant/       LimitConstant（单笔 / 单日限额）、OrderStatusConstant（订单状态 0–4）、NotifyStatusConstant（通知状态 0–2）
-├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController / TerminalNotifyController（模拟对端）
+├── constant/       LimitConstant（单笔 / 单日限额）、OrderStatusConstant（订单状态 0–4）、NotifyStatusConstant（通知状态 0–2）、FlowTypeConstant（流水类型）、ReconConstant（对账状态与差异类型）
+├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController / TerminalNotifyController（模拟对端）/ AdminReconController（对账）
 ├── dto/            请求体
 ├── entity/         与表一一对应
 ├── interceptor/    LoginInterceptor（JWT 校验 + 身份注入）
@@ -406,9 +436,9 @@ src/main/java/com/campus/card/
 | 4 | 充值下单、幂等（`requestNo` 唯一键） | ✅ 已完成 |
 | 5 | 支付回调幂等、单日限额硬校验、余额入账 + 流水 | ✅ 已完成 |
 | 6 | 异步通知与重试（`t_notify_record` 定时投递、退避重试、HMAC 验签、超时关单，模拟学校一卡通系统） | ✅ 已完成 |
-| 7 | 渠道对账单接入 | ⏳ 计划中 |
-| 8 | 三方对账引擎（排序归并） | ⏳ 计划中 |
-| 9 | 管理端接口（订单管理、差异处理） | ⏳ 计划中 |
+| 7 | 三方对账引擎（排序归并、四类差异、人工核销） | ✅ 已完成 |
+| 8 | 渠道对账单接入（真实账单文件解析入库） | ⏳ 计划中 |
+| 9 | 管理端接口（订单管理、运营统计） | ⏳ 计划中 |
 | 10 | 压测、文档、部署 | ⏳ 计划中 |
 
 ---
@@ -435,6 +465,9 @@ src/main/java/com/campus/card/
 - **`AtomicBoolean` 挡不住多实例**。`NotifyRetryTask` 里的 `running` 标志只防「上一轮还没跑完、这一轮又叠进来」，它在**单个 JVM 内**有效；两个实例各有各的 `running`，互相完全不可见。多实例的重复投递要么靠分布式锁，要么靠数据库原子抢占 —— **锁的粒度越细越并行，代价是必须处理「抢到了却没回写」**（细粒度方案要加 `claim_time` 列和超时回收，粗粒度方案不需要）。
 - **接口返回假值，比不返回更危险**。`notifyStatus` / `notifyTimes` / `nextRetryTime` 曾经被硬编码成 `0 / 0 / null`，而前端三个页面其实一直在读真值 —— 结果是「通知终端失败」的黄色告警条和「重发通知」按钮**永远不显示**。前端不会报错，它只是永远走不到那个分支，所以这种 bug 只能靠端到端验收发现。修法是查询路径用 `LEFT JOIN t_notify_record` 取真值（`toVO` 只服务新建单那条路径，此刻确实还没有通知记录，那里填 0 是对的）。同时用 `n.status` 而不是 `IFNULL(n.status, 0)`：**「没有通知这件事」和「有一条等着投递的通知」是两回事**，前端把 `NULL` 渲染成 `-` 才是正确的表达。
 - **验签用恒定时间比较**。`SignUtil.verify` 先判 null、再判长度，最后逐字符异或累加而不是提前 `return` —— 普通 `equals` 会在第一个不同的字符处立刻返回，攻击者靠响应时间就能一位一位把签名试出来。
+- **对账是「排序归并」，不是「循环查库」**。两边各按渠道单号排一次序，双指针扫一遍就出结果（`O(n log n)` 全在排序上，扫描本身是 `O(n)`）。归并只能比**两边都有的列**，所以「已收款未入账」这一类不是「忘了查」，而是**这一列根本不在前两本账里** —— 拿一个不在场的事实去问两本账，它们只能回答「我们俩一致」。要发现它，唯一办法是把记录另一个事实的第三本账拉进来。
+- **重复执行的任务，要区分「机器算出来的」和「人做出来的」**。对账可以随便重跑，机器算出来的任务行、差异行覆盖掉就行；但管理员点过的「已核销」是人做出的判断，不能被一次重跑抹掉。所以删除前先按**业务内容**（而不是自增 id）把已核销的差异捞出来，重插后盖回去 —— id 每次都会变，内容不会。
+- **「返回值能不能表达结论」决定用 `return` 还是 `throw`**。对账跑完 `diff_count = 0` 是一个**有价值的结论**（两边对上了、账是平的）；而「今天一笔已支付单都没有」**不是结论，是输入不满足前提** —— 它只能靠 `throw` 表达，返回 `null` 会被包装成 HTTP 200 + `{"success":true,"data":null}`，把失败伪装成成功。这个 guard 真正防的是**假的平账**：日期选错导致两边都空、归并产出 0 条差异、任务写成「已完成」，管理员看到的就是一句骗人的「账是平的」。
 
 ---
 
