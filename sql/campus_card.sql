@@ -85,7 +85,7 @@ CREATE TABLE t_account_flow (
     flow_no       VARCHAR(40)  NOT NULL COMMENT '流水号，前缀 F',
     card_no       VARCHAR(32)  NOT NULL COMMENT '卡号',
     student_no    VARCHAR(32)  NOT NULL COMMENT '学号',
-    order_no      VARCHAR(40)  NOT NULL DEFAULT '-' COMMENT '关联充值单，消费流水填 -',
+    order_no      VARCHAR(40)  NOT NULL DEFAULT '-' COMMENT '关联单号：充值填充值单号，消费填终端请求号',
     flow_type     VARCHAR(16)  NOT NULL COMMENT 'RECHARGE/CONSUME/REFUND/ADJUST',
     amount        BIGINT       NOT NULL COMMENT '有符号：充值正、消费负',
     balance_after BIGINT       NOT NULL COMMENT '入账后余额，对账要核这个',
