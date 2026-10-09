@@ -35,9 +35,4 @@ public class ReconConstant {
     /** 渠道账单里「这笔交易成功」的标记 */
     public static final String TRADE_SUCCESS = "SUCCESS";
 
-    /* ---------- ★ 只为演示造数用的三个参数 ---------- */
-    /** 造一笔「渠道有、平台没有」的长款，金额 50 元 */
-    public static final long DEMO_GHOST_AMOUNT = 5_000L;
-    /** 把渠道账单上某一笔金额改大 1 元，造金额不符 */
-    public static final long DEMO_AMOUNT_DIFF  = 100L;
 }

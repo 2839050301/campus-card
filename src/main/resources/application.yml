@@ -43,10 +43,11 @@ campus:
     ttl-minutes: 720
   pay:
     notify-url: http://127.0.0.1:18082/api/mock/terminal/notify
-    notify-secret: campus-card-notify-secret-2026      # ★ 新增：通知签名密钥
+    notify-secret: campus-card-notify-secret-2026      # 新增：通知签名密钥
     order-expire-minutes: 15
     retry-backoff-seconds: 30,60,120,240,480
-
+  recon:
+    bill-dir: ./bill
 springdoc:
   swagger-ui:
     path: /swagger-ui.html

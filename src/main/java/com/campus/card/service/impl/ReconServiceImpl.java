@@ -11,20 +11,20 @@ import com.campus.card.constant.ReconConstant;
 import com.campus.card.entity.*;
 import com.campus.card.mapper.*;
 import com.campus.card.service.ReconService;
+import com.campus.card.service.bill.BillFileParser;
 import com.campus.card.vo.ReconDiffVO;
 import com.campus.card.vo.ReconTaskVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.campus.card.service.bill.BillParseResult;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 
@@ -42,10 +42,11 @@ public class ReconServiceImpl implements ReconService {
     private final RechargeOrderMapper rechargeOrderMapper;
     private final AccountFlowMapper accountFlowMapper;
     private final ReconDiffMapper reconDiffMapper;
+    private final BillFileParser billFileParser;
 
     @Override
     /**
-     * 把渠道账单拉进来（演示实现：从平台当天「已支付」的充值单抄一份，再朝三个方向拧出差异）
+     * 把渠道账单拉进来：读渠道给的账单文件，整份校验通过之后才入库。
      *
      * ★ 这里【故意不写】@Transactional：
      *   它在 run() 里是 this.pullChannelBill(...) 调用的，不走 Spring 代理，
@@ -60,6 +61,8 @@ public class ReconServiceImpl implements ReconService {
     public int pullChannelBill(String billDate, String channel) {
         LocalDate date = parseDate(billDate);
         String ch = normalizeChannel(channel);
+
+        // 幂等闸门：该日该渠道已经拉过就不再拉（同一份文件拉两次，账目会凭空翻倍）
         Long exists = channelBillMapper.selectCount(new LambdaQueryWrapper<ChannelBill>()
                 .eq(ChannelBill::getBillDate, date)
                 .eq(ChannelBill::getChannel, ch));
@@ -67,55 +70,17 @@ public class ReconServiceImpl implements ReconService {
             log.info("渠道账单已存在，跳过拉取 billDate={} channel={}", date, ch);
             return 0;
         }
-        // 真实系统 这里读的是渠道给的账单文件
-        // 本项目：把平台当日支付成功的单「抄一份」当成渠道账单，然后再人工写入
-        List<RechargeOrder> paid = rechargeOrderMapper.selectList(new LambdaQueryWrapper<RechargeOrder>()
-                .eq(RechargeOrder::getBillDate, date)
-                .eq(RechargeOrder::getStatus, OrderStatusConstant.PAID)
-                .orderByAsc(RechargeOrder::getChannelOrderNo));
-        List<ChannelBill> bills = new ArrayList<>();
-        for (RechargeOrder o : paid) {
-            ChannelBill bill = new ChannelBill();
-            bill.setBillDate(date);
-            bill.setChannel(ch);
-            bill.setChannelOrderNo(o.getChannelOrderNo());
-            bill.setAmount(o.getAmount());
-            bill.setTradeStatus(ReconConstant.TRADE_SUCCESS);
-            bills.add(bill);
-        }
-        //   短款：渠道账里漏掉一笔（我们记了单、渠道说没收 —— 钱比账少，要去追）
-        //    remove(0) —— 列表是按 channel_order_no 升序排好的，所以删掉的
-        //    一定是当天【渠道单号最小】的那一笔，结果可复现。
-        if (bills.size() > 2) {
-            bills.remove(0);
-        }
 
-        //   金额不符：把剩下的第 2 笔改大 1 元。
-        if (bills.size() > 1) {
-            ChannelBill tampered = bills.get(1);
-            tampered.setAmount(tampered.getAmount() + ReconConstant.DEMO_AMOUNT_DIFF);
-        }
+        // 解析与入库分开：先让解析器把整份文件读完、校验完，拿到内存里的一份完整结果
+        BillParseResult parsed = billFileParser.parse(ch, date);
 
-        // ③ 长款：渠道多一笔平台根本没有的单（钱比账多，补单即可）
-        ChannelBill ghost = new ChannelBill();
-        ghost.setBillDate(date);
-        ghost.setChannel(ch);
-        ghost.setChannelOrderNo(ghostChannelOrderNo(date));
-        ghost.setAmount(ReconConstant.DEMO_GHOST_AMOUNT);
-        ghost.setTradeStatus(ReconConstant.TRADE_SUCCESS);
-        bills.add(ghost);
-
-        // ================================================================
-        // ★★ 演示造数结束
-        // ================================================================
-
-        for (ChannelBill b : bills) {
+        // 全部通过了，才统一入库
+        for (ChannelBill b : parsed.rows()) {
             channelBillMapper.insert(b);
         }
-        log.info("模拟拉取渠道账单 billDate={} channel={} 解析出 {} 行", date, ch, bills.size());
-        return bills.size();
-
-
+        log.info("拉取渠道账单 file={} 解析并入账 {} 行 合计 {} 分",
+                parsed.fileName(), parsed.rowCount(), parsed.totalAmount());
+        return parsed.rowCount();
     }
 
     @Override
@@ -381,18 +346,6 @@ public class ReconServiceImpl implements ReconService {
      */
     private String keyOf(ReconDiff d) {
         return safe(d.getOrderNo()) + "|" + safe(d.getDiffType()) + "|" + safe(d.getChannelOrderNo());
-    }
-
-    /**
-     * 造一个「只存在于渠道账单里」的渠道单号。
-     * 必须排在所有真实单号【之后】，双指针扫到最后才会遇到它，
-     * 结果才可复现。真实的 channel_order_no = "CH" + yyyyMMdd + 3位序号 + 4位随机，
-     * 第 11 个字符是 0~9；这里固定用 '9'，所以一定比任何真实单号大。
-     */
-    private String ghostChannelOrderNo(LocalDate date) {
-        String day = date.format(DateTimeFormatter.BASIC_ISO_DATE);   // 20261005
-        int seq = ThreadLocalRandom.current().nextInt(100, 1000);
-        return "CH" + day + "9" + seq;
     }
 
     private String safe(String s) {
