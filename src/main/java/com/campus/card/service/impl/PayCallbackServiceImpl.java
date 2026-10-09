@@ -40,7 +40,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public PayCallbackVO handlePayCallback(String orderNo, String result) {
+    public PayCallbackVO handlePayCallback(String orderNo, String result,String remark) throws BizException {
 
 
         // 锁订单行
@@ -112,7 +112,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         order.setStatus(OrderStatusConstant.PAID);
         order.setPayTime(LocalDateTime.now());
         order.setChannelOrderNo(channelOrderNoOf(orderNo));
-        order.setRemark("");
+        order.setRemark(remark);
         rechargeOrderMapper.updateById(order);
 
         //写通知记录(status=0 待通知)

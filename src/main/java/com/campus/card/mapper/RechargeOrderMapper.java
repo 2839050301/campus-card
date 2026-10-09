@@ -2,11 +2,13 @@ package com.campus.card.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.campus.card.entity.RechargeOrder;
 import com.campus.card.vo.RechargeOrderVO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 
@@ -52,5 +54,20 @@ public interface RechargeOrderMapper extends BaseMapper<RechargeOrder> {
      * @return {@link RechargeOrder }
      */
     @Select("SELECT * FROM t_recharge_order WHERE order_no =#{orderNo} FOR UPDATE")
-    RechargeOrder lockBYOrderNo(@Param("orderNo")String orderNo);
+    RechargeOrder lockBYOrderNo(@Param("orderNo") String orderNo);
+
+
+    /**
+     * 管理端分页。
+     */
+    IPage<RechargeOrderVO> selectAdminPage(
+            @Param("page") Page<RechargeOrderVO> Page,
+            @Param("status") Integer status,
+            @Param("payMethod") String payMethod,
+            @Param("keyword") String kw);
+
+    /**
+     * 管理端详情
+     */
+    RechargeOrderVO selectAdminVoByOrderNo(String orderNo);
 }

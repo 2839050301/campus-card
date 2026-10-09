@@ -41,6 +41,7 @@
         </where>
         ORDER BY o.create_time DESC, o.id DESC
     </select>
+
     <select id="selectVoByOrderNo" resultType="com.campus.card.vo.RechargeOrderVO">
         SELECT
         <include refid="voColumns"/>
@@ -51,6 +52,31 @@
             o.student_no = #{studentNo}
             AND o.order_no = #{orderNo}
         </where>
+    </select>
+    <select id="selectAdminPage" resultType="com.campus.card.vo.RechargeOrderVO">
+        SELECT
+        <include refid="voColumns"/>
+        FROM t_recharge_order o
+        LEFT JOIN t_user u ON o.student_no = u.account
+        LEFT JOIN t_notify_record n ON n.order_no = o.order_no
+        <where>
+            <if test="status != null">AND o.status = #{status}</if>
+            <if test="payMethod != null and payMethod != ''">AND o.pay_method = #{payMethod}</if>
+            <if test="keyword != null and keyword != ''">
+                AND (o.order_no LIKE CONCAT('%', #{keyword}, '%')
+                OR o.student_no LIKE CONCAT('%', #{keyword}, '%')
+                OR u.name LIKE CONCAT('%', #{keyword}, '%'))
+            </if>
+        </where>
+        ORDER BY o.create_time DESC, o.id DESC
+    </select>
+    <select id="selectAdminVoByOrderNo" resultType="com.campus.card.vo.RechargeOrderVO">
+        SELECT
+        <include refid="voColumns"/>
+        FROM t_recharge_order o
+        LEFT JOIN t_user u ON o.student_no = u.account
+        LEFT JOIN t_notify_record n ON n.order_no = o.order_no
+        WHERE o.order_no = #{orderNo}
     </select>
 
 </mapper>

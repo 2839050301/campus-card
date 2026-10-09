@@ -1,5 +1,6 @@
 package com.campus.card.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.campus.card.constant.NotifyStatusConstant;
 import com.campus.card.entity.NotifyRecord;
@@ -174,6 +175,15 @@ public class NotifyRecordServiceImpl implements NotifyRecordService {
             }
         }
         return due.size();
+    }
+
+    @Override
+    public int requeue(String orderNo) {
+        return notifyRecordMapper.update(null,new LambdaUpdateWrapper<NotifyRecord>()
+                .eq(NotifyRecord::getOrderNo, orderNo)
+                .set(NotifyRecord::getStatus, NotifyStatusConstant.WAIT)
+                .set(NotifyRecord::getNotifyTimes, 0)
+                .set(NotifyRecord::getNextRetryTime, LocalDateTime.now()));
     }
 
     /**

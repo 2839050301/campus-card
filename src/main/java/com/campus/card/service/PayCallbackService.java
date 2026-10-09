@@ -14,7 +14,8 @@ public interface PayCallbackService {
      *
      * @param orderNo 平台充值订单
      * @param result  SUCCESS / 其它（其它一律当失败）果
+     * @param remark  备注
      * @return {@link PayCallbackVO }
      */
-    PayCallbackVO handlePayCallback(String orderNo, String result);
+    PayCallbackVO handlePayCallback(String orderNo, String result,String remark);
 }

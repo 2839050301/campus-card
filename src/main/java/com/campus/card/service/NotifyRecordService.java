@@ -28,4 +28,12 @@ public interface NotifyRecordService {
      * @return 本轮处理的条数（0 表示没活儿）
      */
     int deliverDue(int limit);
+
+    /**
+     * 把某单的通知放回待投递队列：状态改回待通知、重试次数清零、下次投递时间 = 现在。
+     * 它不投递。投递这件事全系统只有调度器一个发起者。
+     *
+     * @return 受影响行数，0 表示这单没有通知记录
+     */
+    int requeue(String orderNo);
 }

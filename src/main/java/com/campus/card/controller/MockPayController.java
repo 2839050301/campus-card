@@ -29,7 +29,7 @@ public class MockPayController {
             @RequestParam(value = "result", required = false, defaultValue = "SUCCESS") String result
     ) {
 
-        PayCallbackVO vo = payCallbackService.handlePayCallback(orderNo, result);
+        PayCallbackVO vo = payCallbackService.handlePayCallback(orderNo, result,"");
         if (vo.getStatus() != null && vo.getStatus() == OrderStatusConstant.CLOSED){
             return Result.fail(ErrCode.BIZ_ERROR, vo.getMessage());
         }
