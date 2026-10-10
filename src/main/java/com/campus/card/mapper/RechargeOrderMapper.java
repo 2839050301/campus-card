@@ -58,6 +58,14 @@ public interface RechargeOrderMapper extends BaseMapper<RechargeOrder> {
 
 
     /**
+     * 按单号查订单
+     *
+     * @param orderNo 订单没有
+     * @return {@link RechargeOrder }
+     */
+    @Select("select * from t_recharge_order where order_no=#{orderNo}")
+    RechargeOrder selectByOrderNo(@Param("orderNo") String orderNo);
+    /**
      * 管理端分页。
      */
     IPage<RechargeOrderVO> selectAdminPage(

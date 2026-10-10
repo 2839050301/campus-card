@@ -3,7 +3,7 @@
 面向校园一卡通的**充值 → 支付回调 → 入账 → 对账**资金链路的后端服务。
 
 > 个人项目，按 10 天迭代推进。
-> **当前进度：Day 1–10**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试 / 三方对账引擎 / 刷卡消费扣款 / 管理端补齐（今日概览 / 多条件查询 / 通知重发 / 人工补单 / 演示数据重置） / 渠道对账单接入（真实账单文件解析入库、坏文件拒收））。
+> **当前进度：Day 1–11**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试 / 三方对账引擎 / 刷卡消费扣款 / 管理端补齐（今日概览 / 多条件查询 / 通知重发 / 人工补单 / 演示数据重置） / 渠道对账单接入（真实账单文件解析入库、坏文件拒收） / 支付宝沙箱支付（手写 RSA2 签名、异步通知验签入账、页面回跳））。
 > 后续计划见 [进度与路线图](#进度与路线图)。
 
 ---
@@ -25,7 +25,7 @@
 
 ---
 
-## 已完成的功能（Day 1–9）
+## 已完成的功能（Day 1–11）
 
 ### 1. 统一响应体与全局异常
 
@@ -262,6 +262,43 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 
 ---
 
+### 11. 支付宝沙箱支付（Day 11）
+
+前面的「支付」全是自己模拟自己：`/api/mock/pay` 是我们自己写的假回调，钱怎么进来全凭我们说。
+今天接一次**真的外部系统**：支付宝沙箱。报文要按它的规则拼、签名要按它的算法算、通知要真的是它发来的 —— 这里第一次出现「对方说了算」的东西。
+
+- **手写 RSA2，不引官方 SDK**。官方 `alipay-sdk-java` 的 `4.40.1031.ALL` 一个包就 **39.8 MB**，还会拖进 `commons-logging:1.1.1`（2014 年）、`dom4j:1.6.1`（2005 年）等 5 个陈旧依赖。我们只用到两件事：拼串 + `SHA256withRSA` 签名，JDK 自带 `java.security` 全都能做，所以 `AlipaySignUtil` 只用纯 JDK。
+- **两个方向的拼串规则不一样：上行带 `sign_type`，下行剔 `sign_type`**。非空参数按 key 升序拼成 `k=v&k=v`，`sign` 是被签/被验的对象，自己永远不参与。剩下的差别只有 `sign_type`：我们**发出去**的请求要带着它一起签名（剔了网关回 `invalid-signature`），支付宝**回给我们**的报文要连它一起剔（不剔就永远验不过，官方 SDK 的校验方法头两行就是删 `sign`、删 `sign_type`）。这一段是拿真实付款试出来的：第一笔沙箱支付成功、支付宝也把通知送来了，我们却带着 `sign_type` 验签失败回了 `failure` —— 钱在支付宝那边已经扣了，账上一分没动。
+- **参数分两处放**：除 `biz_content` 之外的所有参数都挂在**提交地址的查询串**里（要 URL 编码），`biz_content` 走 POST 体。全塞进 POST 体会被判 `invalid-signature`（实测）。所以后端返回的是 `action`（网关地址 + `?` + 已签名的查询串）和 `bizContent`，前端只建一个隐藏域。
+- **异步通知的返回格式由支付宝定，不由我们的 `Result` 定**。它是表单（`application/x-www-form-urlencoded`），要用 `request.getParameterMap()` 读，**不能 `@RequestBody`**；返回体是纯文本 `success` / `failure`。回 `success` 支付宝就认为投递成功、**永不重发** —— 所以「入账失败却回 success」等于把这笔钱永久丢掉，验签失败一律回 `failure`。
+- **放行要写具体路径，不要写通配**。`WebConfig` 里只放行 `/api/pay/alipay/notify` 与 `/api/pay/alipay/return` 两个具体路径：写成 `/api/pay/**` 会把 `/prepay` 一起放行 —— 而 `/prepay` 必须继续要 token，否则任何人都能替别人取签名参数。
+- **回跳不改钱**。用户付完钱，支付宝会把浏览器跳回 `/return`，我们只把它送回收银台；**钱以异步通知为准**。跳转（同步）和通知（异步）是两条独立的路，用户付完不点返回、直接关掉页面，回跳根本不会发生。
+- **密钥不进仓库**。`appId` / 应用私钥 / 支付宝公钥放在 `sandbox.local.yml`，`.gitignore` 忽略它，`application.yml` 只留一句 `spring.config.import` 指过去 —— 仓库里搜不到私钥。
+
+实测：`/api/pay/alipay/prepay` 冒烟后用 `curl` 拿着 `action` + `bizContent` 提交，最终落到沙箱收银台
+（`https://excashier-sandbox.dl.alipaydev.com/standard/auth.htm?payOrderId=...`），不再是 `invalid-signature`；
+真人在沙箱付掉一笔之后，支付宝的异步通知确实打到了 ngrok 上的 `/api/pay/alipay/notify` ——
+第一笔（`R20261010092GSM6`）因为上面那条「下行要剔 `sign_type`」没修，验签失败回了 `failure`
+（日志：`收到支付宝通知：out_trade_no=... trade_status=TRADE_SUCCESS` 紧跟着 `支付宝通知验签失败`），
+钱在支付宝那边扣了、我们账上一分没动。
+
+修完当天下午就有一笔真实付款走通了全链路（**2026-10-10 17:03:37，单号 `R20261010106Z97X`，500.00 元**）：
+
+| 环节 | 日志证据 |
+|---|---|
+| 支付宝真的把通知打过来 | `收到支付宝通知：out_trade_no=R20261010106Z97X trade_status=TRADE_SUCCESS` |
+| 验签通过并入了账 | `入账成功 orderNo=R20261010106Z97X cardNo=6217123456781234 amount=50000分 balanceAfter=135650分` |
+| 渠道单号是真流水号（不是 `CH` 占位） | `2026101022001438170509972525` |
+| 账户流水 | `F20261010072WU5W` RECHARGE 50000 分、`balance_after` 135650 分、备注「一卡通充值 · 支付宝」 |
+| 对外通知（Day 6 那套退避重试）也投出去了 | `通知投递成功 orderNo=R20261010106Z97X,第1次`，对方回 `{"code":0,"msg":"OK"}` |
+
+验收脚本的 V8b 认的就是这条链：真付款没法脚本代劳，所以它在运行开头（**重置之前**）先把库里的真单抓成快照，
+抓不到就用这一笔的留档日志断言「收到通知、验签入账、真渠道单号、对外通知投递成功」四条 ——
+★ 顺序不能反：脚本自己 `V2` 那一步会 `/mock/reset`，重置会把这笔真单连同流水、通知记录一起清掉，
+曾经因此把要验的证据先销毁了。所以快照必须在重置之前抓，留档日志单独存。
+
+---
+
 ## 接口一览
 
 | 方法 | 路径 | 说明 | 鉴权 |
@@ -288,6 +325,9 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 | POST | `/api/terminal/consume` | **刷卡消费扣款**（`requestNo` 幂等 + 条件更新扣余额） | 管理员（模拟终端） |
 | POST | `/api/mock/reset` | **重置演示数据**（清 6 张表 → 造 10 笔单 → 走真实入账链路；仅非生产环境注册） | 放行 |
 | POST | `/api/mock/bill/generate` | **生成演示渠道账单文件**（扮演渠道，只写 `bill/` 下的 CSV，不碰库；仅非生产环境注册） | 放行 |
+| POST | `/api/pay/alipay/prepay` | 取支付宝支付参数（手写 RSA2 签名，返回 `action` + `bizContent`） | 学生 |
+| POST | `/api/pay/alipay/notify` | **支付宝异步通知**（表单参数 + 验签 → 入账；返回纯文本 `success` / `failure`） | 放行 |
+| GET | `/api/pay/alipay/return` | 支付宝页面回跳（只把浏览器送回收银台，**不碰钱**） | 放行 |
 
 **登录**
 
@@ -545,12 +585,12 @@ src/main/java/com/campus/card/
 ├── common/         Result / ErrCode / BizException / 全局异常处理 / UserContext
 ├── config/         MyBatis-Plus 分页、OpenAPI、Web（拦截器注册 + CORS）、BCrypt、Jackson、RestTemplate
 ├── constant/       LimitConstant（单笔 / 单日限额）、OrderStatusConstant（订单状态 0–4）、NotifyStatusConstant（通知状态 0–2）、FlowTypeConstant（流水类型）、ReconConstant（对账状态与差异类型）
-├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController / TerminalNotifyController（模拟对端）/ AdminReconController（对账）/ TerminalController（消费扣款）/ AdminRechargeController（管理端充值单）/ MockResetController（重置演示数据、生成演示账单）
+├── controller/     PingController / AuthController / AccountController / RechargeController / MockPayController / TerminalNotifyController（模拟对端）/ AdminReconController（对账）/ TerminalController（消费扣款）/ AdminRechargeController（管理端充值单）/ MockResetController（重置演示数据、生成演示账单）/ AlipayPayController（支付宝：取支付参数 / 异步通知 / 页面回跳）
 ├── dto/            请求体
 ├── entity/         与表一一对应
 ├── interceptor/    LoginInterceptor（JWT 校验 + 身份注入）
 ├── mapper/         MyBatis-Plus Mapper
-├── service/        业务接口与实现（`service/bill/` 是对账相关：BillFileParser 解析账单文件、BillParseResult 解析结果、DemoBillFileWriter 生成演示账单）
+├── service/        业务接口与实现（`service/bill/` 是对账相关：BillFileParser 解析账单文件、BillParseResult 解析结果、DemoBillFileWriter 生成演示账单；`service/alipay/` 是支付宝报文相关：AlipaySignUtil 手写 RSA2 签名/验签）
 ├── task/           NotifyRetryTask（通知投递 + 退避重试）、OrderCloseTask（超时关单）
 ├── util/           JwtUtil / OrderNoGenerator / SignUtil（HMAC-SHA256 验签）
 └── vo/             响应体（不含敏感字段）
@@ -572,7 +612,8 @@ src/main/java/com/campus/card/
 | 8 | 刷卡消费扣款（条件更新防超扣、终端幂等、负数流水） | ✅ 已完成 |
 | 9 | 管理端收尾（今日概览、充值单分页、重发通知、人工补单、重置演示数据） | ✅ 已完成 |
 | 10 | 渠道对账单接入（真实账单文件解析入库） | ✅ 已完成 |
-| 11 | 压测、文档、部署 | ⏳ 计划中 |
+| 11 | 支付宝沙箱支付（手写 RSA2 签名、异步通知验签入账、页面回跳） | ✅ 已完成 |
+| 12 | 压测、文档、部署 | ⏳ 计划中 |
 
 ---
 
@@ -612,6 +653,9 @@ src/main/java/com/campus/card/
 - **账单文件是「别人的输入」，所以先验后用、且一行都不许提前入库**。解析器只把文件变成内存里的记录，六道校验（文件在不在、日期、渠道、表头、金额格式、汇总行对得上）全过之后才由调用方写库。行级容错在这里是错的：一份「能进一半」的账单，第二天会凭空多出一批短款，而且查不出是谁写进去的。**宁可今天没有账单，也不要把半份账单记成账。**
 - **金额换单位只允许一种写法**：`new BigDecimal("201.00").movePointRight(2).longValueExact()`。反例 `(long)(Double.parseDouble(x) * 100)` 在 0.29 元上给出 28 分 —— 这类偏差不会抛异常，只会让账目永久地对不上，所以它不是代码风格问题，是账目问题。
 - **改动顺序也是正确性的一部分**。演示账单要「删一笔、改一笔、补一笔」，而删除会把后面所有元素的下标往前挪一位：先删再改，改到的就不是你想改的那一笔。这种错不会报错、不会抛异常，只会让差异表里出现一笔莫名其妙的「金额不符」—— 改完代码一定要用**数据**再看一遍，而不是只看编译通过。
+- **对接外部系统时，拿对方的产物当尺子，不要拿自己的理解当尺子**。手写支付宝报文时，「哪些参数参与签名、参数放查询串还是放请求体」在文档里散成好几处，自己读出来的结论先后自相矛盾。真正解决问题的一步是：把官方 SDK 拉进一个空工程当**参照物**，让它自己生成一张表单和一条拼串，再和自己的**逐字符对齐** —— 一比就比出两处差异（`sign_type` 该参与签名、除报文体外的参数要在查询串里）。之前那些「换个规则签一份发一次、看返回码」的尝试之所以没用，是因为**没有判据的对比不叫实验，叫掷骰子**（把 HTTP 302 当成了「过」，却没跟到底）。
+- **对外的回调接口，返回什么由调用方定，不由我们的统一返回体定**。`/api/pay/alipay/notify` 的返回类型是 `String` 而不是 `Result<T>`：支付宝只认 `success` / `failure` 两个词，而它看到 `success` 就**永不重发**。所以这个接口的「失败」必须显式回 `failure` —— 用我们自己的 `{success:true}` 包一层，等于对支付宝说「收到了、别再发了」，钱就永久丢了。
+- **越权面收窄到具体路径**。放行规则写成 `/api/pay/**` 很省事，但它会把同一前缀下的 `/prepay` 一起放行 —— 而 `/prepay` 是**需要登录**的：它替学生取出签名参数。拦截器白名单应当是「外部系统必须访问的那几个具体地址」，不是「看起来相关的一片前缀」。
 
 ---
 

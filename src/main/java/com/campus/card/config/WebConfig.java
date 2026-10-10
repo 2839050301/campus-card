@@ -23,7 +23,13 @@ public class WebConfig implements WebMvcConfigurer {
                 .addPathPatterns("/api/**")
                 .excludePathPatterns("/api/auth/login")
                 .excludePathPatterns("/api/ping")
-                .excludePathPatterns("/api/mock/**");
+                .excludePathPatterns("/api/mock/**")
+                //   支付宝的服务器没有项目token，通知必须能打进来
+                //   放行不等于不设防 —— 这道门由「验签」把守，比 token 更严格
+                //   只放这两个具体路径，不要图省事写 "/api/pay/**"：
+                //    prepay 是学生端接口，它得继续要 token（写在通配符里就一起放出去了）
+                .excludePathPatterns("/api/pay/alipay/notify")
+                .excludePathPatterns("/api/pay/alipay/return");
     }
 
     @Override

@@ -15,7 +15,8 @@ public interface PayCallbackService {
      * @param orderNo 平台充值订单
      * @param result  SUCCESS / 其它（其它一律当失败）果
      * @param remark  备注
+     * @param channelOrderNo 渠道流水号。通知里有支付宝的trade_no
      * @return {@link PayCallbackVO }
      */
-    PayCallbackVO handlePayCallback(String orderNo, String result,String remark);
+    PayCallbackVO handlePayCallback(String orderNo, String result,String channelOrderNo,String remark);
 }

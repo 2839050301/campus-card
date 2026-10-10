@@ -40,7 +40,8 @@ public class PayCallbackServiceImpl implements PayCallbackService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public PayCallbackVO handlePayCallback(String orderNo, String result,String remark) throws BizException {
+    public PayCallbackVO handlePayCallback(String orderNo, String result,
+            String channelOrderNo,String remark) throws BizException {
 
 
         // 锁订单行
@@ -63,7 +64,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         if (!RESULT_SUCCESS.equals(result)) {
             order.setStatus(OrderStatusConstant.FAILED);
             order.setPayTime(LocalDateTime.now());
-            order.setChannelOrderNo(channelOrderNoOf(orderNo));
+            order.setChannelOrderNo(resolveChannelOrderNo(orderNo, channelOrderNo));
             order.setRemark("渠道返回：用户取消支付");
             rechargeOrderMapper.updateById(order);
             log.info("支付失败已落库 orderNo={}", orderNo);
@@ -80,7 +81,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         if (already + order.getAmount() > LimitConstant.DAILY_LIMIT) {
             order.setStatus(OrderStatusConstant.CLOSED);
             order.setCloseTime(LocalDateTime.now());
-            order.setChannelOrderNo(channelOrderNoOf(orderNo));
+            order.setChannelOrderNo(resolveChannelOrderNo(orderNo, channelOrderNo));
             order.setRemark("超出单日累计充值额度（上限" + (LimitConstant.DAILY_LIMIT / 100)
                     + "元），已关闭待退款");
             rechargeOrderMapper.updateById(order);
@@ -111,7 +112,7 @@ public class PayCallbackServiceImpl implements PayCallbackService {
         // ⑨改订单状态：成功
         order.setStatus(OrderStatusConstant.PAID);
         order.setPayTime(LocalDateTime.now());
-        order.setChannelOrderNo(channelOrderNoOf(orderNo));
+        order.setChannelOrderNo(resolveChannelOrderNo(orderNo, channelOrderNo));
         order.setRemark(remark);
         rechargeOrderMapper.updateById(order);
 
@@ -137,6 +138,14 @@ public class PayCallbackServiceImpl implements PayCallbackService {
 
     private String channelOrderNoOf(String orderNo) {
         return "CH" + orderNo.substring(1);
+    }
+    /** 渠道单号 */
+    private String resolveChannelOrderNo(String orderNo, String channelOrderNo) {
+        if (channelOrderNo != null && !channelOrderNo.isBlank()) {
+            return channelOrderNo;   // 支付宝通知带来的真流水号（trade_no）
+        }
+        // 渠道没给真流水号（演示回调、人工补单）：退回占位单号
+        return channelOrderNoOf(orderNo);
     }
 
 

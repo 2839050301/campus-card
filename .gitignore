@@ -37,3 +37,5 @@ build/
 
 ### 演示渠道账单（Day 10 · MockResetController 生成，每次重置都会被覆盖）###
 bill/
+sandbox.local.yml
+application-local.yml

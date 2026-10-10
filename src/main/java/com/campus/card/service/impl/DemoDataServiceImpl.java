@@ -123,7 +123,7 @@ public class DemoDataServiceImpl implements DemoDataService {
 
             if (finalStatus == OrderStatusConstant.PAID) {
                 // ★ 全流程只有这一步走真实链路：余额、流水、通知记录都由它产生
-                payCallbackService.handlePayCallback(order.getOrderNo(), TRADE_SUCCESS, "");
+                payCallbackService.handlePayCallback(order.getOrderNo(), TRADE_SUCCESS, "","");
             } else if (finalStatus == OrderStatusConstant.CLOSED) {
                 order.setStatus(OrderStatusConstant.CLOSED);
                 order.setCloseTime(LocalDateTime.now());

@@ -77,7 +77,7 @@ public class AdminRechargeServiceImpl implements AdminRechargeService {
         if (before.getStatus() != null && before.getStatus() == OrderStatusConstant.CLOSED) {
             throw new BizException("该单已关闭，不能补单");
         }
-        payCallbackService.handlePayCallback(orderNo, TRADE_SUCCESS, "人工补单 by " + operator);
+        payCallbackService.handlePayCallback(orderNo, TRADE_SUCCESS, "","人工补单 by " + operator);
         return rechargeOrderMapper.selectAdminVoByOrderNo(orderNo);
     }
 
