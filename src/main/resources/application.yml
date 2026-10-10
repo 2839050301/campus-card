@@ -55,7 +55,9 @@ campus:
       # 穿透域名。支付宝的通知是它的服务器发起的，回调地址必须是公网能访问到的
     notify-url: https://morale-citrus-photo.ngrok-free.dev/api/pay/alipay/notify
       # 用户付完钱浏览器被跳回这里（本机地址就行，因为跳转是他的浏览器发起的）
-    return-url: http://127.0.0.1:18088/api/pay/alipay/return
+      # ★ 端口是 18082（后端）：/api/pay/alipay/return 这个接口在后端上，
+      #   由它再 redirect 到下面的 return-page（18088 前端收银台）。写 18088 会变成前端 404 白页
+    return-url: http://127.0.0.1:18082/api/pay/alipay/return
       # 我们再把他从他的浏览器送到充值单页面
     return-page: http://127.0.0.1:18088/pay.html
 springdoc:

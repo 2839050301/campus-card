@@ -23,6 +23,7 @@
         <redisson.version>3.52.0</redisson.version>
         <springdoc.version>2.9.1</springdoc.version>
         <jjwt.version>0.12.7</jjwt.version>
+        <alipay-sdk.version>4.40.1031.ALL</alipay-sdk.version>
     </properties>
 
     <dependencies>
@@ -92,6 +93,23 @@
             <artifactId>jjwt-jackson</artifactId>
             <version>${jjwt.version}</version>
             <scope>runtime</scope>
+        </dependency>
+        <!-- 支付宝官方 SDK：签名 / 拼参数 / 表单形状都交给它。
+             ★ 代价是真的：主包 39.8MB，还拖 7 个传递依赖（fastjson 1.2.83_noneautotype、
+               bcprov-jdk15on 1.62、okhttp 3.12.13、okio 1.15.0、dom4j 1.6.1、xml-apis 1.0.b2、
+               commons-logging 1.1.1），取舍见 README「Day 11 增补」。 -->
+        <dependency>
+            <groupId>com.alipay.sdk</groupId>
+            <artifactId>alipay-sdk-java</artifactId>
+            <version>${alipay-sdk.version}</version>
+            <exclusions>
+                <!-- ★ 必须排掉：Spring Boot 用 spring-jcl 提供 org.apache.commons.logging，
+                     再进来一个 commons-logging 1.1.1 就是同一批类出现两次（谁是赢家看类路径顺序） -->
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <!-- Lombok -->
         <dependency>

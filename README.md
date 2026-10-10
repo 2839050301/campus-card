@@ -267,15 +267,16 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 前面的「支付」全是自己模拟自己：`/api/mock/pay` 是我们自己写的假回调，钱怎么进来全凭我们说。
 今天接一次**真的外部系统**：支付宝沙箱。报文要按它的规则拼、签名要按它的算法算、通知要真的是它发来的 —— 这里第一次出现「对方说了算」的东西。
 
-- **手写 RSA2，不引官方 SDK**。官方 `alipay-sdk-java` 的 `4.40.1031.ALL` 一个包就 **39.8 MB**，还会拖进 `commons-logging:1.1.1`（2014 年）、`dom4j:1.6.1`（2005 年）等 5 个陈旧依赖。我们只用到两件事：拼串 + `SHA256withRSA` 签名，JDK 自带 `java.security` 全都能做，所以 `AlipaySignUtil` 只用纯 JDK。
+- **签名先用纯 JDK 手写，再接官方 SDK（两段都留在代码里）**。官方 `alipay-sdk-java:4.40.1031.ALL` 一个包就 **39.8 MB**，还会拖进 `commons-logging:1.1.1`、`fastjson:1.2.83`、`bcprov-jdk15on:1.62` 等 8 个依赖；而我们要的只有拼串 + `SHA256withRSA`，JDK 自带 `java.security` 全都能做 —— 所以第一版是 `AlipaySignUtil` 纯 JDK 手写。**手写的价值不在「省了 39 MB」，在于把规则逼出来**：正是手写才踩出了下面那两处不对称。规则搞清楚之后主路径换成官方 SDK（`pageExecute` 生成表单、`AlipaySignature.rsaCheckV1` 验签），`AlipaySignUtil` 降级为【对照实现】继续被单测使用 —— **签用我们的规则、验用 SDK 的规则**，能验过就说明两套规则一致。
 - **两个方向的拼串规则不一样：上行带 `sign_type`，下行剔 `sign_type`**。非空参数按 key 升序拼成 `k=v&k=v`，`sign` 是被签/被验的对象，自己永远不参与。剩下的差别只有 `sign_type`：我们**发出去**的请求要带着它一起签名（剔了网关回 `invalid-signature`），支付宝**回给我们**的报文要连它一起剔（不剔就永远验不过，官方 SDK 的校验方法头两行就是删 `sign`、删 `sign_type`）。这一段是拿真实付款试出来的：第一笔沙箱支付成功、支付宝也把通知送来了，我们却带着 `sign_type` 验签失败回了 `failure` —— 钱在支付宝那边已经扣了，账上一分没动。
-- **参数分两处放**：除 `biz_content` 之外的所有参数都挂在**提交地址的查询串**里（要 URL 编码），`biz_content` 走 POST 体。全塞进 POST 体会被判 `invalid-signature`（实测）。所以后端返回的是 `action`（网关地址 + `?` + 已签名的查询串）和 `bizContent`，前端只建一个隐藏域。
+- **参数分两处放**：除 `biz_content` 之外的所有参数都挂在**提交地址的查询串**里（要 URL 编码），`biz_content` 走 POST 体。全塞进 POST 体会被判 `invalid-signature`（实测）。换成 SDK 之后这条规则由 SDK 内部遵守：`prepay` 返回的是**整段现成的 `<form>` HTML**（`formHtml`），前端把它插进 DOM 再 `submit()` —— 前端不拼参数、不碰密钥、也不接触签名。
 - **异步通知的返回格式由支付宝定，不由我们的 `Result` 定**。它是表单（`application/x-www-form-urlencoded`），要用 `request.getParameterMap()` 读，**不能 `@RequestBody`**；返回体是纯文本 `success` / `failure`。回 `success` 支付宝就认为投递成功、**永不重发** —— 所以「入账失败却回 success」等于把这笔钱永久丢掉，验签失败一律回 `failure`。
+- **异常路径同样要兜住，不能漏到全局异常处理器**。`handlePayCallback` 抛 `BizException`（比如单号在库里不存在）时，`@RestControllerAdvice` 会把它包成 `Result` JSON 返回 —— 支付宝看到不是纯文本 `success`，会按失败处理并重试。结果碰巧是对的（该重试），但那是**运气不是设计**：正确写法是在 `handleNotify` 里 catch 住、显式回 `failure`。语义是「这次没入账，请再投」：技术性异常（DB 抖动）重试就是第二次机会；永久性失败（单号不存在）重试也不会成，但支付宝重试有上限，停发后这笔钱留在支付宝侧，对账引擎会按 `CHANNEL_ONLY`（长款）把它捞出来人工处理。反面是吞掉异常回 `success` —— 那才是把钱永久丢掉。
 - **放行要写具体路径，不要写通配**。`WebConfig` 里只放行 `/api/pay/alipay/notify` 与 `/api/pay/alipay/return` 两个具体路径：写成 `/api/pay/**` 会把 `/prepay` 一起放行 —— 而 `/prepay` 必须继续要 token，否则任何人都能替别人取签名参数。
-- **回跳不改钱**。用户付完钱，支付宝会把浏览器跳回 `/return`，我们只把它送回收银台；**钱以异步通知为准**。跳转（同步）和通知（异步）是两条独立的路，用户付完不点返回、直接关掉页面，回跳根本不会发生。
+- **回跳不改钱**。用户付完钱，支付宝会把浏览器跳回 `/return`，我们只把它送回收银台；**钱以异步通知为准**。跳转（同步）和通知（异步）是两条独立的路，用户付完不点返回、直接关掉页面，回跳根本不会发生。（踩过的坑：`return-url` 必须指向**后端** `18082` 的 `/api/pay/alipay/return`，由它再 redirect 到前端收银台；写成前端 `18088` 的话，付完款浏览器直接落在前端的 404 白页上——钱、入账、通知都不受影响，坏的只是浏览器这一跳，因为它们本来就是两条独立的路。）
 - **密钥不进仓库**。`appId` / 应用私钥 / 支付宝公钥放在 `sandbox.local.yml`，`.gitignore` 忽略它，`application.yml` 只留一句 `spring.config.import` 指过去 —— 仓库里搜不到私钥。
 
-实测：`/api/pay/alipay/prepay` 冒烟后用 `curl` 拿着 `action` + `bizContent` 提交，最终落到沙箱收银台
+实测：`/api/pay/alipay/prepay` 冒烟后，把返回的 `formHtml` 里的 `action` + `biz_content` 用 `curl` 提交（就是浏览器那次 POST），最终落到沙箱收银台
 （`https://excashier-sandbox.dl.alipaydev.com/standard/auth.htm?payOrderId=...`），不再是 `invalid-signature`；
 真人在沙箱付掉一笔之后，支付宝的异步通知确实打到了 ngrok 上的 `/api/pay/alipay/notify` ——
 第一笔（`R20261010092GSM6`）因为上面那条「下行要剔 `sign_type`」没修，验签失败回了 `failure`
@@ -296,6 +297,27 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 抓不到就用这一笔的留档日志断言「收到通知、验签入账、真渠道单号、对外通知投递成功」四条 ——
 ★ 顺序不能反：脚本自己 `V2` 那一步会 `/mock/reset`，重置会把这笔真单连同流水、通知记录一起清掉，
 曾经因此把要验的证据先销毁了。所以快照必须在重置之前抓，留档日志单独存。
+
+#### 增补（2026-10-10 晚）：主路径换成官方 SDK
+
+接 SDK 的直接原因是缺**主动查单**。支付宝通知是主路，但它可能只投一次、失败就再也不来 ——
+实测 16:25 那次验签失败后，它对同一笔**没有重发**，最后是靠人工补单补的账。
+「通知是主路、查单是兜底、渠道账单是最后一道网」这三层里我们只有首尾，中间那层得有；
+而 `alipay.trade.query` 的请求/响应模型类只有 SDK 里有，自己照文档再手写一轮又是一堆「对方说了算」的活。
+
+换完之后的事实（每一条都是跑出来的，不是推断）：
+
+| 验的是什么 | 怎么验的 | 结果 |
+|---|---|---|
+| SDK 生成的表单能不能过网关签名 | 把 `prepay` 返回的 `formHtml` 原样提交给沙箱网关 | `200` → `excashier-sandbox.dl.alipaydev.com/standard/auth.htm?payOrderId=...`，没有 `invalid-signature` |
+| 两套签名规则是否一致 | 单测里用 `AlipaySignUtil`（我们的规则）签报文，交给 `AlipaySignature.rsaCheckV1`（SDK 的规则）验 | `Tests run: 7, Failures: 0, Errors: 0` |
+| 契约改动有没有弄坏老链路 | 回归验收 `_day11-accept.ps1` | **PASS 73 / FAIL 0** |
+
+接口契约因此从「后端给参数表」变成「后端给一段 HTML」：`AlipayPayVO` 只剩 `gatewayUrl`（排查用）
+和 `formHtml`（前端唯一要用的），前端 `payAlipay()` 只做 `innerHTML` 注入 + `form.submit()`。
+★ 前端不要自己再建 `biz_content` 隐藏域 —— 那段 HTML 里已经有一个，重复会变成两个同名域。
+★ `pageExecute` 只回整段 HTML：`AlipayResponse.getParams()` 在页面跳转类接口上是 `null`（实测），
+所以「拿回参数表自己拼」这条路根本走不通，这也是契约必须变的原因。
 
 ---
 
@@ -654,7 +676,7 @@ src/main/java/com/campus/card/
 - **金额换单位只允许一种写法**：`new BigDecimal("201.00").movePointRight(2).longValueExact()`。反例 `(long)(Double.parseDouble(x) * 100)` 在 0.29 元上给出 28 分 —— 这类偏差不会抛异常，只会让账目永久地对不上，所以它不是代码风格问题，是账目问题。
 - **改动顺序也是正确性的一部分**。演示账单要「删一笔、改一笔、补一笔」，而删除会把后面所有元素的下标往前挪一位：先删再改，改到的就不是你想改的那一笔。这种错不会报错、不会抛异常，只会让差异表里出现一笔莫名其妙的「金额不符」—— 改完代码一定要用**数据**再看一遍，而不是只看编译通过。
 - **对接外部系统时，拿对方的产物当尺子，不要拿自己的理解当尺子**。手写支付宝报文时，「哪些参数参与签名、参数放查询串还是放请求体」在文档里散成好几处，自己读出来的结论先后自相矛盾。真正解决问题的一步是：把官方 SDK 拉进一个空工程当**参照物**，让它自己生成一张表单和一条拼串，再和自己的**逐字符对齐** —— 一比就比出两处差异（`sign_type` 该参与签名、除报文体外的参数要在查询串里）。之前那些「换个规则签一份发一次、看返回码」的尝试之所以没用，是因为**没有判据的对比不叫实验，叫掷骰子**（把 HTTP 302 当成了「过」，却没跟到底）。
-- **对外的回调接口，返回什么由调用方定，不由我们的统一返回体定**。`/api/pay/alipay/notify` 的返回类型是 `String` 而不是 `Result<T>`：支付宝只认 `success` / `failure` 两个词，而它看到 `success` 就**永不重发**。所以这个接口的「失败」必须显式回 `failure` —— 用我们自己的 `{success:true}` 包一层，等于对支付宝说「收到了、别再发了」，钱就永久丢了。
+- **对外的回调接口，返回什么由调用方定，不由我们的统一返回体定**。`/api/pay/alipay/notify` 的返回类型是 `String` 而不是 `Result<T>`：支付宝只认 `success` / `failure` 两个词，而它看到 `success` 就**永不重发**。所以这个接口的「失败」必须显式回 `failure` —— 用我们自己的 `{success:true}` 包一层，等于对支付宝说「收到了、别再发了」，钱就永久丢了。**异常也算一条返回路径**：`BizException` 漏到全局异常处理器会变成 `Result` JSON，支付宝按失败重试、结果碰巧正确 —— 但「请重投」这句话应该由我们显式说出来，而不是靠支付宝看不懂 JSON 猜出来。
 - **越权面收窄到具体路径**。放行规则写成 `/api/pay/**` 很省事，但它会把同一前缀下的 `/prepay` 一起放行 —— 而 `/prepay` 是**需要登录**的：它替学生取出签名参数。拦截器白名单应当是「外部系统必须访问的那几个具体地址」，不是「看起来相关的一片前缀」。
 
 ---

@@ -17,7 +17,12 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * @Description 支付宝签名 / 验签工具（纯 JDK 实现，不引官方 SDK）。
+ * @Description 支付宝签名 / 验签工具（纯 JDK 实现的手写版）。
+ *              ★ 主路径已经换成官方 SDK 了（见 config/AlipaySdkConfig + AlipayPayServiceImpl）：
+ *                「验签要不要剔 sign_type」「参数放查询串还是 POST 体」这些事现在由 SDK 保证。
+ *                本类保留下来当【对照实现】，用来钉住「我们对规则的理解」：
+ *                单测 AlipayNotifyTest 用它按真实规则签报文，再由 SDK 的 rsaCheckV1 验回来 ——
+ *                两边规则只要差一点点，单测立刻红。规则本身没错，错的是当年只写了一份、上下行共用。
  *              规则：只剔除 sign 自己、剔除空值、按参数名升序拼成 k=v&k=v，
  *              再用 SHA256withRSA 签名 —— 支付宝管这套叫 RSA2。
  *              ★ sign_type 是要参与签名的，别顺手把它也剔掉（踩过：网关回 invalid-signature）。

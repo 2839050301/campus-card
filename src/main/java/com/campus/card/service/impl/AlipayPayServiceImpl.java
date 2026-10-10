@@ -1,12 +1,16 @@
 package com.campus.card.service.impl;
 
+import com.alipay.api.AlipayApiException;
+import com.alipay.api.AlipayClient;
+import com.alipay.api.internal.util.AlipaySignature;
+import com.alipay.api.request.AlipayTradePagePayRequest;
+import com.alipay.api.response.AlipayTradePagePayResponse;
 import com.campus.card.common.BizException;
 import com.campus.card.constant.OrderStatusConstant;
 import com.campus.card.entity.RechargeOrder;
 import com.campus.card.mapper.RechargeOrderMapper;
 import com.campus.card.service.AlipayPayService;
 import com.campus.card.service.PayCallbackService;
-import com.campus.card.service.alipay.AlipaySignUtil;
 import com.campus.card.vo.AlipayPayVO;
 import com.campus.card.vo.LoginUser;
 import com.campus.card.vo.RechargeOrderVO;
@@ -19,15 +23,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * @Description 支付宝支付：拼参数签名 + 收通知验签
+ * @Description 支付宝支付：由官方 SDK 生成支付表单 + 收通知验签
  * @Author u
  * @Date 2026/10/10
  */
@@ -48,24 +49,23 @@ public class AlipayPayServiceImpl implements AlipayPayService {
      *   骗到的后果不是编译错，是「钱扣了、账没加、而且支付宝认为投递成功不再重发」。
      */
     private static final String RESULT_SUCCESS = "SUCCESS";
-    private static final String METHOD_PAGE_PAY = "alipay.trade.page.pay";
     private static final String PRODUCT_CODE = "FAST_INSTANT_TRADE_PAY";
     private static final String SUBJECT = "校园一卡通充值";
+    /** RSA2 就是 SHA256withRSA —— 和 AlipaySdkConfig 里那个值必须一致 */
     private static final String SIGN_TYPE_RSA2 = "RSA2";
-
-    /** ★ 是空格分隔的，不是 T 分隔的：2026-10-10 14:03:11 */
-    private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** ★ 验签时按这个字符集取字节，必须和报文里的 charset 一致 */
+    private static final String CHARSET_UTF8 = "UTF-8";
 
     private final RechargeOrderMapper rechargeOrderMapper;
     private final PayCallbackService payCallbackService;
     private final ObjectMapper objectMapper;
+    /** ★ 官方 SDK 客户端：拼参数、签名、验签都归它（Bean 在 config/AlipaySdkConfig） */
+    private final AlipayClient alipayClient;
 
     @Value("${campus.alipay.app-id}")
     private String appId;
     @Value("${campus.alipay.gateway-url}")
     private String gatewayUrl;
-    @Value("${campus.alipay.merchant-private-key}")
-    private String merchantPrivateKey;
     @Value("${campus.alipay.alipay-public-key}")
     private String alipayPublicKey;
     @Value("${campus.alipay.notify-url}")
@@ -87,56 +87,52 @@ public class AlipayPayServiceImpl implements AlipayPayService {
             throw new BizException("该单已过期，请重新下单");
         }
 
-        // ★ TreeMap：让参数表天然是排好序的，打日志看报文时舒服
-        Map<String, String> params = new TreeMap<>();
-        params.put("app_id", appId);
-        params.put("method", METHOD_PAGE_PAY);
-        params.put("charset", "UTF-8");
-        params.put("sign_type", SIGN_TYPE_RSA2);
-        params.put("timestamp", LocalDateTime.now().format(TIMESTAMP));
-        params.put("version", "1.0");
-        params.put("notify_url", notifyUrl);
+        // ★ 参数表、签名、以及「哪些参数放查询串、biz_content 放 POST 体」这些事，
+        //   全部交给官方 SDK —— 我们手拼时踩过的两个坑，SDK 内部早就定死了。
+        AlipayTradePagePayRequest request = new AlipayTradePagePayRequest();
+        request.setNotifyUrl(notifyUrl);
         if (!returnUrl.isBlank()) {
-            params.put("return_url", returnUrl);
+            request.setReturnUrl(returnUrl);
         }
-        params.put("biz_content", bizContent(order));
-        // ★ 签名放最后：它签的是上面所有参数，自己当然不能参与拼串
-        params.put("sign", AlipaySignUtil.sign(params, merchantPrivateKey));
+        request.setBizContent(bizContent(order));
 
-        // ★★ 支付宝要的形状：除 biz_content 外所有参数放 URL 查询串，biz_content 放 POST 体。
-        //    网关自己的说法是「请确认 charset 参数放在了 URL 查询字符串中」；
-        //    把全部参数都塞进 POST 体，会被判 invalid-signature（实测，别问为什么）。
-        String bizContent = params.get("biz_content");
-        String action = gatewayUrl + "?" + queryString(params);
+        String formHtml;
+        try {
+            // ★ pageExecute 只在本地拼表单 + 签名，不发 HTTP 请求（所以它不需要网络，单测也能跑）
+            AlipayTradePagePayResponse response = alipayClient.pageExecute(request);
+            formHtml = response.getBody();
+        } catch (AlipayApiException e) {
+            // 拼不出来基本只有一种原因：私钥没配 / 配错了。这是技术异常，按 Day 5 的规矩往上抛
+            throw new BizException("调用支付宝 SDK 生成支付表单失败：" + e.getMessage());
+        }
 
-        log.info("发起支付宝支付：orderNo={} 金额={}分", orderNo, order.getAmount());
-        return new AlipayPayVO(gatewayUrl, params, action, bizContent);
+        log.info("发起支付宝支付：orderNo={} 金额={}分（表单由官方 SDK 生成）", orderNo, order.getAmount());
+        return new AlipayPayVO(gatewayUrl, formHtml);
     }
 
     /**
-     * 除 biz_content 外的参数拼成查询串，键值都做 URL 编码。
-     * ★ 别和拼串混了：签名的拼串用原文（不编码），传输的查询串必须编码，这是两件事。
+     * 用「支付宝公钥」验签 —— 交给官方 SDK。
+     * ★★ 上行和下行拼串规则不一样，这里就是当年真栽过的那个坑：
+     *    我们【发出去】的请求要带 sign_type 一起签；支付宝【回来】的报文要连 sign_type 一起剔。
+     *    官方 rsaCheckV1() 内部头两行就是 params.remove("sign") + params.remove("sign_type")。
+     * ★ 它【就地改】传进来的这张表：调用之后 params 里就没有 sign / sign_type 了。
+     *   下面接着用 out_trade_no / trade_status / trade_no / total_amount 都没问题，
+     *   但别再把它当「原件」去写日志或存库。
+     * ★ 任何异常都算「没验过」：签名格式不对、公钥粘错、字符集不匹配，在这里是同一件事。
      */
-    private String queryString(Map<String, String> params) {
-        StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, String> e : params.entrySet()) {
-            if ("biz_content".equals(e.getKey())) {
-                continue;
-            }
-            if (!sb.isEmpty()) {
-                sb.append('&');
-            }
-            sb.append(URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8))
-              .append('=')
-              .append(URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8));
+    private boolean verify(Map<String, String> params) {
+        try {
+            return AlipaySignature.rsaCheckV1(params, alipayPublicKey, CHARSET_UTF8, SIGN_TYPE_RSA2);
+        } catch (AlipayApiException e) {
+            log.warn("支付宝通知验签异常：{}", e.getMessage());
+            return false;
         }
-        return sb.toString();
     }
 
     @Override
     public String handleNotify(Map<String, String> params) {
         // ★★ 第一件事永远是验签。验不过就一个字段都别信、一条数据库都别碰
-        if (!AlipaySignUtil.verify(params, alipayPublicKey)) {
+        if (!verify(params)) {
             log.warn("支付宝通知验签失败：out_trade_no={}", params.get("out_trade_no"));
             return "failure";
         }
@@ -160,7 +156,20 @@ public class AlipayPayServiceImpl implements AlipayPayService {
 
         // ★ 记账只有一份实现：真通知和演示回调走同一个方法，只是这次给它真的渠道单号
         // ★ 第二个参数必须是 RESULT_SUCCESS（"SUCCESS"），不是上面那个 TRADE_SUCCESS —— 见常量处的注释
-        payCallbackService.handlePayCallback(orderNo, RESULT_SUCCESS, params.get("trade_no"), "");
+        try {
+            payCallbackService.handlePayCallback(orderNo, RESULT_SUCCESS, params.get("trade_no"), "");
+        } catch (Exception e) {
+            // ★★ 异常路径也必须显式回 "failure"，不能让异常漏到全局异常处理器。
+            //    漏出去的后果：@RestControllerAdvice 把它包成 Result JSON 返回 ——
+            //    支付宝看到不是纯文本 "success" 会当失败重试，碰巧结果一样，但那是运气不是设计。
+            //    显式回 "failure" 的语义是「这次没入账，请再投」：
+            //    - 技术性异常（DB 抖动、锁等待超时）：事务已回滚、钱没入账，重试就是第二次机会；
+            //    - 永久性失败（单号在库里不存在）：重试也不会成功，但支付宝重试有上限，
+            //      停发后这笔钱留在支付宝侧，对账引擎会按 CHANNEL_ONLY（长款）把它捞出来人工处理。
+            //    反面是吞掉异常回 "success" —— 钱在支付宝扣了、我们一分没记，而且永不重发，钱就永久丢了。
+            log.error("支付宝通知处理失败，回 failure 让支付宝重试：orderNo={}", orderNo, e);
+            return "failure";
+        }
         return "success";
     }
 
