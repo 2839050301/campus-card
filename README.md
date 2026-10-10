@@ -3,7 +3,7 @@
 面向校园一卡通的**充值 → 支付回调 → 入账 → 对账**资金链路的后端服务。
 
 > 个人项目，按 10 天迭代推进。
-> **当前进度：Day 1–11**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试 / 三方对账引擎 / 刷卡消费扣款 / 管理端补齐（今日概览 / 多条件查询 / 通知重发 / 人工补单 / 演示数据重置） / 渠道对账单接入（真实账单文件解析入库、坏文件拒收） / 支付宝沙箱支付（手写 RSA2 签名、异步通知验签入账、页面回跳））。
+> **当前进度：Day 1–11**（工程骨架 / 登录认证 / 账户与流水查询 / 充值下单与幂等 / 支付回调入账 / 异步通知与退避重试 / 三方对账引擎 / 刷卡消费扣款 / 管理端补齐（今日概览 / 多条件查询 / 通知重发 / 人工补单 / 演示数据重置） / 渠道对账单接入（真实账单文件解析入库、坏文件拒收） / 支付宝沙箱支付（官方 SDK 生成支付表单、异步通知验签入账、页面回跳））。
 > 后续计划见 [进度与路线图](#进度与路线图)。
 
 ---
@@ -267,7 +267,7 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 前面的「支付」全是自己模拟自己：`/api/mock/pay` 是我们自己写的假回调，钱怎么进来全凭我们说。
 今天接一次**真的外部系统**：支付宝沙箱。报文要按它的规则拼、签名要按它的算法算、通知要真的是它发来的 —— 这里第一次出现「对方说了算」的东西。
 
-- **签名先用纯 JDK 手写，再接官方 SDK（两段都留在代码里）**。官方 `alipay-sdk-java:4.40.1031.ALL` 一个包就 **39.8 MB**，还会拖进 `commons-logging:1.1.1`、`fastjson:1.2.83`、`bcprov-jdk15on:1.62` 等 8 个依赖；而我们要的只有拼串 + `SHA256withRSA`，JDK 自带 `java.security` 全都能做 —— 所以第一版是 `AlipaySignUtil` 纯 JDK 手写。**手写的价值不在「省了 39 MB」，在于把规则逼出来**：正是手写才踩出了下面那两处不对称。规则搞清楚之后主路径换成官方 SDK（`pageExecute` 生成表单、`AlipaySignature.rsaCheckV1` 验签），`AlipaySignUtil` 降级为【对照实现】继续被单测使用 —— **签用我们的规则、验用 SDK 的规则**，能验过就说明两套规则一致。
+- **签名先用纯 JDK 手写摸清规则，随后接官方 SDK，最后把手写那版删掉**。官方 `alipay-sdk-java:4.40.1031.ALL` 一个包就 **39.8 MB**，还会拖进 `commons-logging:1.1.1`、`fastjson:1.2.83`、`bcprov-jdk15on:1.62` 等 8 个依赖；而我们要的只有拼串 + `SHA256withRSA`，JDK 自带 `java.security` 全都能做 —— 所以第一版是 `AlipaySignUtil` 纯 JDK 手写。**手写的价值不在「省了 39 MB」，在于把规则逼出来**：正是手写才踩出了下面那两处不对称。规则搞清楚之后主路径换成官方 SDK（`pageExecute` 生成表单、`AlipaySignature.rsaCheckV1` 验签）；「手写那版降级成对照实现、继续给单测当尺子」这条路只走了一天，也被删掉了 —— 理由见本节末尾「增补」的最后一段。
 - **两个方向的拼串规则不一样：上行带 `sign_type`，下行剔 `sign_type`**。非空参数按 key 升序拼成 `k=v&k=v`，`sign` 是被签/被验的对象，自己永远不参与。剩下的差别只有 `sign_type`：我们**发出去**的请求要带着它一起签名（剔了网关回 `invalid-signature`），支付宝**回给我们**的报文要连它一起剔（不剔就永远验不过，官方 SDK 的校验方法头两行就是删 `sign`、删 `sign_type`）。这一段是拿真实付款试出来的：第一笔沙箱支付成功、支付宝也把通知送来了，我们却带着 `sign_type` 验签失败回了 `failure` —— 钱在支付宝那边已经扣了，账上一分没动。
 - **参数分两处放**：除 `biz_content` 之外的所有参数都挂在**提交地址的查询串**里（要 URL 编码），`biz_content` 走 POST 体。全塞进 POST 体会被判 `invalid-signature`（实测）。换成 SDK 之后这条规则由 SDK 内部遵守：`prepay` 返回的是**整段现成的 `<form>` HTML**（`formHtml`），前端把它插进 DOM 再 `submit()` —— 前端不拼参数、不碰密钥、也不接触签名。
 - **异步通知的返回格式由支付宝定，不由我们的 `Result` 定**。它是表单（`application/x-www-form-urlencoded`），要用 `request.getParameterMap()` 读，**不能 `@RequestBody`**；返回体是纯文本 `success` / `failure`。回 `success` 支付宝就认为投递成功、**永不重发** —— 所以「入账失败却回 success」等于把这笔钱永久丢掉，验签失败一律回 `failure`。
@@ -310,14 +310,22 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 | 验的是什么 | 怎么验的 | 结果 |
 |---|---|---|
 | SDK 生成的表单能不能过网关签名 | 把 `prepay` 返回的 `formHtml` 原样提交给沙箱网关 | `200` → `excashier-sandbox.dl.alipaydev.com/standard/auth.htm?payOrderId=...`，没有 `invalid-signature` |
-| 两套签名规则是否一致 | 单测里用 `AlipaySignUtil`（我们的规则）签报文，交给 `AlipaySignature.rsaCheckV1`（SDK 的规则）验 | `Tests run: 7, Failures: 0, Errors: 0` |
-| 契约改动有没有弄坏老链路 | 回归验收 `_day11-accept.ps1` | **PASS 73 / FAIL 0** |
+| 通知链路的接线有没有被换 SDK 弄坏 | 单测（签和验都交给 SDK，钉的是金额核对、异常回 `failure`、幂等交给谁） | `Tests run: 7, Failures: 0, Errors: 0` |
+| 契约改动有没有弄坏老链路 | 回归验收 `_day11-accept.ps1` | **PASS 67 / FAIL 0**（删掉手写实现那几条断言之前是 73 / 0） |
 
 接口契约因此从「后端给参数表」变成「后端给一段 HTML」：`AlipayPayVO` 只剩 `gatewayUrl`（排查用）
 和 `formHtml`（前端唯一要用的），前端 `payAlipay()` 只做 `innerHTML` 注入 + `form.submit()`。
 ★ 前端不要自己再建 `biz_content` 隐藏域 —— 那段 HTML 里已经有一个，重复会变成两个同名域。
 ★ `pageExecute` 只回整段 HTML：`AlipayResponse.getParams()` 在页面跳转类接口上是 `null`（实测），
 所以「拿回参数表自己拼」这条路根本走不通，这也是契约必须变的原因。
+
+★ 2026-10-10 深夜又做了一次**减法**：把 `AlipaySignUtil`，连同单测里那条「用手写规则签、让 SDK 验」的
+交叉验证、以及验收脚本里的 V8a 规则回归，一起删掉了。理由只有一条：**同一件事留两条实现，规则迟早分叉，
+而分叉的那天没人知道该信谁** —— 留下的那条是 SDK（网关认它）。
+代价也照实说：**「两套规则一致」这条证明随之消失**，现在能证明的是「SDK 生成的表单能过真网关」和
+「真付款的通知链在库里留下了完整证据（快照 + 留档日志）」。少一条证明，换掉一整类未来的分叉。
+哪天又需要验签名规则，最省事的办法仍然是当年那一步：把官方产物放进一个空工程当参照物，逐字符对齐 ——
+**尺子可以随时再造，但别把两把尺子同时留在生产代码里。**
 
 ---
 
@@ -347,7 +355,7 @@ Day 7 的对账引擎其实是个空壳：`pullChannelBill` 直接在库里现�
 | POST | `/api/terminal/consume` | **刷卡消费扣款**（`requestNo` 幂等 + 条件更新扣余额） | 管理员（模拟终端） |
 | POST | `/api/mock/reset` | **重置演示数据**（清 6 张表 → 造 10 笔单 → 走真实入账链路；仅非生产环境注册） | 放行 |
 | POST | `/api/mock/bill/generate` | **生成演示渠道账单文件**（扮演渠道，只写 `bill/` 下的 CSV，不碰库；仅非生产环境注册） | 放行 |
-| POST | `/api/pay/alipay/prepay` | 取支付宝支付参数（手写 RSA2 签名，返回 `action` + `bizContent`） | 学生 |
+| POST | `/api/pay/alipay/prepay` | 取支付宝支付表单（官方 SDK 生成整段 `<form>`，返回 `gatewayUrl` + `formHtml`） | 学生 |
 | POST | `/api/pay/alipay/notify` | **支付宝异步通知**（表单参数 + 验签 → 入账；返回纯文本 `success` / `failure`） | 放行 |
 | GET | `/api/pay/alipay/return` | 支付宝页面回跳（只把浏览器送回收银台，**不碰钱**） | 放行 |
 
@@ -612,7 +620,7 @@ src/main/java/com/campus/card/
 ├── entity/         与表一一对应
 ├── interceptor/    LoginInterceptor（JWT 校验 + 身份注入）
 ├── mapper/         MyBatis-Plus Mapper
-├── service/        业务接口与实现（`service/bill/` 是对账相关：BillFileParser 解析账单文件、BillParseResult 解析结果、DemoBillFileWriter 生成演示账单；`service/alipay/` 是支付宝报文相关：AlipaySignUtil 手写 RSA2 签名/验签）
+├── service/        业务接口与实现（`service/bill/` 是对账相关：BillFileParser 解析账单文件、BillParseResult 解析结果、DemoBillFileWriter 生成演示账单）
 ├── task/           NotifyRetryTask（通知投递 + 退避重试）、OrderCloseTask（超时关单）
 ├── util/           JwtUtil / OrderNoGenerator / SignUtil（HMAC-SHA256 验签）
 └── vo/             响应体（不含敏感字段）
@@ -634,7 +642,7 @@ src/main/java/com/campus/card/
 | 8 | 刷卡消费扣款（条件更新防超扣、终端幂等、负数流水） | ✅ 已完成 |
 | 9 | 管理端收尾（今日概览、充值单分页、重发通知、人工补单、重置演示数据） | ✅ 已完成 |
 | 10 | 渠道对账单接入（真实账单文件解析入库） | ✅ 已完成 |
-| 11 | 支付宝沙箱支付（手写 RSA2 签名、异步通知验签入账、页面回跳） | ✅ 已完成 |
+| 11 | 支付宝沙箱支付（官方 SDK 生成支付表单、异步通知验签入账、页面回跳） | ✅ 已完成 |
 | 12 | 压测、文档、部署 | ⏳ 计划中 |
 
 ---

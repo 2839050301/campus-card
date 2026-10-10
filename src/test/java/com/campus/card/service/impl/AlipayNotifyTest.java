@@ -1,12 +1,13 @@
 package com.campus.card.service.impl;
 
+import com.alipay.api.AlipayApiException;
 import com.alipay.api.AlipayClient;
+import com.alipay.api.internal.util.AlipaySignature;
 import com.alipay.api.DefaultAlipayClient;
 import com.campus.card.common.BizException;
 import com.campus.card.entity.RechargeOrder;
 import com.campus.card.mapper.RechargeOrderMapper;
 import com.campus.card.service.PayCallbackService;
-import com.campus.card.service.alipay.AlipaySignUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -14,12 +15,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
-import java.security.Signature;
-import java.security.interfaces.RSAPrivateKey;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -37,9 +35,8 @@ import static org.mockito.Mockito.when;
  * ★ 真实支付宝的报文我们伪造不了（没有它的私钥），所以测试里自己生成一对 RSA 密钥：
  *   公钥当「支付宝公钥」配进服务，私钥用来扮演支付宝签报文 —— 验签自然能过，
  *   于是 handleNotify 后面的分支（金额核对、入账、异常兜底）就都能走到了。
- * ★ 这里还顺带钉住一条链：签报文用的是【我们手写的规则】（AlipaySignUtil.verifyContent），
- *   验报文用的是【官方 SDK】（AlipaySignature.rsaCheckV1）——
- *   两边规则只要差一点点，这几个用例立刻红，这正是换 SDK 之后仍然保留手写实现的理由。
+ * ★ 签名和验签都走官方 SDK（rsaSign / rsaCheckV1）。这几个用例钉的是【我们的接线】：
+ *   报文怎么读、金额跟谁比、异常回什么、幂等交给谁 —— 不钉 SDK 自己的签名规则（那是它的事）。
  */
 class AlipayNotifyTest {
 
@@ -51,10 +48,10 @@ class AlipayNotifyTest {
     private PayCallbackService payCallbackService;
     private AlipayPayServiceImpl service;
 
-    /** 「支付宝」的私钥 —— 测试里用它签报文（真实世界只有支付宝自己有） */
-    private RSAPrivateKey alipayPrivateKey;
+    /** 「支付宝」的私钥（PKCS#8 的 Base64）—— 测试里用它签报文（真实世界只有支付宝自己有） */
+    private String alipayPrivateKey;
     /** 「假支付宝」的私钥 —— 用来签出密码学上合法、但钥匙不对的伪造签名 */
-    private RSAPrivateKey forgedPrivateKey;
+    private String forgedPrivateKey;
 
     @BeforeEach
     void setUp() throws GeneralSecurityException {
@@ -62,8 +59,8 @@ class AlipayNotifyTest {
         payCallbackService = mock(PayCallbackService.class);
 
         KeyPair alipayKeys = generateKeyPair();
-        alipayPrivateKey = (RSAPrivateKey) alipayKeys.getPrivate();
-        forgedPrivateKey = (RSAPrivateKey) generateKeyPair().getPrivate();
+        alipayPrivateKey = base64(alipayKeys, false);
+        forgedPrivateKey = base64(generateKeyPair(), false);
 
         // ★ 真的 new 一个官方 SDK 客户端出来（pageExecute 只在本地拼表单 + 签名，不发网络请求）：
         //   生产里它由 config/AlipaySdkConfig 提供，测试里用自己的密钥对就够了。
@@ -155,20 +152,17 @@ class AlipayNotifyTest {
         params.put("trade_no", TRADE_NO);
         params.put("trade_status", tradeStatus);
         params.put("total_amount", totalAmount);
-        params.put("sign_type", "RSA2");
+        // ★ 故意不放 sign_type：SDK 的 rsaSign 会把它一起签进去，而 rsaCheckV1 验签前会先删掉它 ——
+        //   放了就必然验不过。（真实报文里是有的，因为支付宝服务端按自己的规则签，那条规则不归我们管。）
         return params;
     }
 
-    /**
-     * 扮演支付宝签名：按【下行】拼串规则（剔 sign + sign_type）算出待签内容，再用给定私钥签。
-     * ★ 不能直接用 AlipaySignUtil.sign() —— 它按【上行】规则拼串（sign_type 参与签名），
-     *   签出来的报文在我们的 verify（剔 sign_type）下永远验不过。上行/下行规则差这一个参数。
-     */
-    private void signAsAlipay(Map<String, String> params, RSAPrivateKey privateKey) throws GeneralSecurityException {
-        Signature signature = Signature.getInstance("SHA256withRSA");
-        signature.initSign(privateKey);
-        signature.update(AlipaySignUtil.verifyContent(params).getBytes(StandardCharsets.UTF_8));
-        params.put("sign", Base64.getEncoder().encodeToString(signature.sign()));
+    /** 扮演支付宝签名：直接用官方 SDK 的 rsaSign（和验签同一套规则，天然对称） */
+    private void signAsAlipay(Map<String, String> params, String privateKey) throws AlipayApiException {
+        // 4 参重载要的是【拼好的待签串】+ 明确的算法（"RSA2" = SHA256withRSA）；
+        // 3 参的 Map 重载走的是默认算法（RSA = SHA1withRSA），和验签那边的 RSA2 对不上。
+        String content = AlipaySignature.getSignContent(params);
+        params.put("sign", AlipaySignature.rsaSign(content, privateKey, "UTF-8", "RSA2"));
     }
 
     private KeyPair generateKeyPair() throws GeneralSecurityException {
@@ -177,7 +171,7 @@ class AlipayNotifyTest {
         return generator.generateKeyPair();
     }
 
-    /** 私钥是 PKCS#8、公钥是 X.509 —— AlipaySignUtil 按这两个格式解码 */
+    /** 私钥是 PKCS#8、公钥是 X.509 的 Base64 —— 支付宝密钥工具给的就是这两个格式 */
     private String base64(KeyPair keyPair, boolean publicKey) {
         byte[] encoded = publicKey ? keyPair.getPublic().getEncoded() : keyPair.getPrivate().getEncoded();
         return Base64.getEncoder().encodeToString(encoded);
